@@ -26,6 +26,14 @@ was stuck in (DbgHelp + .pdb); and which thread woke it up.
 - `FEATURES.md` is append-only. Never delete, reword or renumber an existing entry. Add new
   entries at the end of a section and record status changes as new lines in its status log.
   A new entry must not contradict an earlier one; if it would, stop and ask the user.
+- Name each branch after the change it holds, never with a `claude/` prefix. For a work
+  item use `w<N>-short-description`; otherwise a short description of the change. One work
+  item per branch. Create it from `main`:
+
+  ```powershell
+  git checkout -b w2-match-stacks-by-timestamp main
+  git push -u origin w2-match-stacks-by-timestamp
+  ```
 
 ## File layout
 

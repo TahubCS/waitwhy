@@ -91,4 +91,5 @@ Newest line last. Format: `YYYY-MM-DD  ID  status  note`.
 - 2026-10-12  C1–C8, D1–D6  recorded  From the project brief.
 - 2026-10-12  W1–W11  proposed  From the first code review; none approved yet.
 - 2026-10-12  W12  proposed  From the design audit; not approved yet.
+- 2026-10-12  W2  started  Approved by the user. Implemented in waitwhy.cpp; waits for a demo run to confirm.
 - 2026-10-12  W1–W12  approved  By the user after the first demo run (lock found, no stacks resolved).
