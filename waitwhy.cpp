@@ -19,6 +19,7 @@
 // Run (Administrator PowerShell, because kernel tracing needs admin rights):
 //   .\waitwhy.exe --pid 1234
 //   .\waitwhy.exe --name slowapp.exe --seconds 10 --top 8
+//   .\waitwhy.exe --name slowapp.exe --seconds 5 --dump-events dump.txt
 
 #ifndef UNICODE
 #define UNICODE
@@ -181,6 +182,8 @@ uint64_t g_stacksAttached = 0;
 uint64_t g_waitsWithoutStack = 0;
 bool g_stacksOn = false;  // set before the trace is read; no stacks means no point waiting
 std::atomic<bool> g_stopRequested{false};
+FILE* g_dump = nullptr;   // --dump-events output; null when not asked for
+uint64_t g_dumpLines = 0;
 
 uint64_t HashWait(int8_t reason, const std::vector<uint64_t>& stack) {
   uint64_t h = 1469598103934665603ull;  // FNV-1a
@@ -231,6 +234,13 @@ void OnCSwitch(const EVENT_RECORD* ev, uint64_t ts) {
   const unsigned cpu = ev->BufferContext.ProcessorNumber;
   if (cpu < g_cpuThread.size()) g_cpuThread[cpu] = c.newThreadId;
 
+  if (g_dump && (g_targetThreads.count(c.oldThreadId) || g_targetThreads.count(c.newThreadId))) {
+    std::fprintf(g_dump, "CSWITCH ts=%llu cpu=%u old=%u new=%u oldState=%d oldReason=%d\n",
+                 static_cast<unsigned long long>(ts), cpu, c.oldThreadId, c.newThreadId,
+                 c.oldThreadState, c.oldThreadWaitReason);
+    ++g_dumpLines;
+  }
+
   // A thread of the target process leaves the CPU.
   if (g_targetThreads.count(c.oldThreadId)) {
     ThreadState& st = g_threads[c.oldThreadId];
@@ -277,6 +287,16 @@ void OnReadyThread(const EVENT_RECORD* ev) {
   uint32_t readied;
   std::memcpy(&readied, ev->UserData, sizeof readied);
   if (!g_targetThreads.count(readied)) return;
+  if (g_dump) {
+    // Payload: uint32 TThreadId, int8 AdjustReason, int8 AdjustIncrement, int8 Flag, int8 spare.
+    const unsigned flag =
+        ev->UserDataLength >= 7 ? static_cast<const uint8_t*>(ev->UserData)[6] : 0u;
+    std::fprintf(g_dump, "READY ts=%llu cpu=%u readied=%u headerThread=%u flag=0x%02x\n",
+                 static_cast<unsigned long long>(ev->EventHeader.TimeStamp.QuadPart),
+                 static_cast<unsigned>(ev->BufferContext.ProcessorNumber), readied,
+                 static_cast<unsigned>(ev->EventHeader.ThreadId), flag);
+    ++g_dumpLines;
+  }
   ThreadState& st = g_threads[readied];
   if (!st.offCpu) return;
   // The thread running on this CPU is the one that woke our thread up.
@@ -303,6 +323,29 @@ void OnStackWalk(const EVENT_RECORD* ev) {
   std::memcpy(&eventTs, p, sizeof eventTs);
   std::memcpy(&stackTid, p + 12, sizeof stackTid);
   if (!g_targetThreads.count(stackTid)) return;
+  const size_t ptrSize = (ev->EventHeader.Flags & EVENT_HEADER_FLAG_64_BIT_HEADER) ? 8 : 4;
+  const size_t frames = (ev->UserDataLength - 16) / ptrSize;
+
+  if (g_dump) {
+    unsigned long long kernelFrames = 0, userFrames = 0, firstUser = 0;
+    for (size_t i = 0; i < frames; ++i) {
+      uint64_t addr = 0;
+      std::memcpy(&addr, p + 16 + i * ptrSize, ptrSize);
+      if (addr >= kUserSpaceLimit) {
+        ++kernelFrames;
+      } else if (addr != 0 && userFrames++ == 0) {
+        firstUser = addr;
+      }
+    }
+    std::fprintf(g_dump,
+                 "STACK ts=%llu eventTs=%llu tid=%u kernelFrames=%llu userFrames=%llu "
+                 "firstUser=0x%llx\n",
+                 static_cast<unsigned long long>(ev->EventHeader.TimeStamp.QuadPart),
+                 static_cast<unsigned long long>(eventTs), stackTid, kernelFrames, userFrames,
+                 firstUser);
+    ++g_dumpLines;
+  }
+
   ThreadState& st = g_threads[stackTid];
   // Only the wait that ended at the switch this stack was recorded for gets it. Stacks for
   // other switches (after a preemption, or for a wait already recorded) are ignored.
@@ -310,8 +353,6 @@ void OnStackWalk(const EVENT_RECORD* ev) {
   if (it == st.awaitingStack.end()) return;
 
   OffCpu& w = it->second;
-  const size_t ptrSize = (ev->EventHeader.Flags & EVENT_HEADER_FLAG_64_BIT_HEADER) ? 8 : 4;
-  const size_t frames = (ev->UserDataLength - 16) / ptrSize;
   for (size_t i = 0; i < frames; ++i) {
     uint64_t addr = 0;
     std::memcpy(&addr, p + 16 + i * ptrSize, ptrSize);
@@ -792,7 +833,10 @@ void PrintReport(double ticksPerSecond, int topN, const SessionProps& stopped, b
 void Usage() {
   std::printf(
       "usage: waitwhy (--pid N | --name program.exe) [--seconds N] [--top N]\n"
+      "               [--dump-events FILE]\n"
       "  Watches a running program and reports what its threads were waiting on.\n"
+      "  --dump-events also writes every context-switch, ready-thread and stack event\n"
+      "  of the program's threads to FILE, one line each, in the order they arrived.\n"
       "  Must be run as Administrator.\n");
 }
 
@@ -801,6 +845,7 @@ void Usage() {
 int wmain(int argc, wchar_t** argv) {
   SetConsoleOutputCP(CP_UTF8);
   std::wstring name;
+  std::wstring dumpPath;
   int seconds = 10;
   int topN = 6;
   for (int i = 1; i < argc; ++i) {
@@ -814,6 +859,8 @@ int wmain(int argc, wchar_t** argv) {
       seconds = (std::max)(1, _wtoi(argv[++i]));
     } else if (a == L"--top" && hasValue) {
       topN = (std::max)(1, _wtoi(argv[++i]));
+    } else if (a == L"--dump-events" && hasValue) {
+      dumpPath = argv[++i];
     } else {
       Usage();
       return 1;
@@ -836,6 +883,24 @@ int wmain(int argc, wchar_t** argv) {
 
   LARGE_INTEGER freq;
   QueryPerformanceFrequency(&freq);
+
+  if (!dumpPath.empty()) {
+    g_dump = _wfopen(dumpPath.c_str(), L"w");
+    if (!g_dump) {
+      std::printf("Cannot write the event dump to %s.\n", Narrow(dumpPath).c_str());
+      CloseHandle(target);
+      return 1;
+    }
+    std::setvbuf(g_dump, nullptr, _IOFBF, 1 << 20);
+    std::fprintf(g_dump,
+                 "# waitwhy raw event dump for PID %u\n"
+                 "# Timestamps are QueryPerformanceCounter ticks, %lld per second.\n"
+                 "# One line per event for the program's threads, in the order delivered.\n"
+                 "# CSWITCH ts cpu old new oldState oldReason\n"
+                 "# READY   ts cpu readied headerThread flag\n"
+                 "# STACK   ts eventTs tid kernelFrames userFrames firstUser\n",
+                 g_pid, static_cast<long long>(freq.QuadPart));
+  }
 
   TRACEHANDLE session = 0;
   ULONG rc = StartKernelSession(&session);
@@ -884,6 +949,12 @@ int wmain(int argc, wchar_t** argv) {
   reader.join();
   CloseTrace(consumer);
   CloseHandle(target);
+  if (g_dump) {
+    std::fclose(g_dump);
+    g_dump = nullptr;
+    std::printf("Wrote %llu events to %s.\n", static_cast<unsigned long long>(g_dumpLines),
+                Narrow(dumpPath).c_str());
+  }
 
   FlushAtEnd();
   PrintReport(static_cast<double>(freq.QuadPart), topN, stopped, stacksOn);

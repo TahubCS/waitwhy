@@ -50,6 +50,12 @@ If your disk is very fast and the buggy numbers look small, start slowapp with m
 .\waitwhy.exe --pid 1234 --top 10
 ```
 
+To see the raw kernel events behind a report, add `--dump-events FILE`. It writes one line per context switch, ready-thread and call-stack event of the program's threads, in the order Windows delivered them, and still prints the normal report:
+
+```powershell
+.\waitwhy.exe --name slowapp.exe --seconds 5 --dump-events dump.txt
+```
+
 Function names only show up for programs that have `.pdb` symbol files next to them (your own debug or `/Zi` builds). For other programs you will see Windows function names (for example `KERNELBASE!ReadFile`) and addresses.
 
 ## How it works
