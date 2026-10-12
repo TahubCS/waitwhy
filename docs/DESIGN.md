@@ -55,26 +55,28 @@ Today both live in the ETW callbacks, so nothing can be tested without a live ke
  ┌──────────────────────────┐   │ ─────────────── no Win32 above this line ──── │
  │ Target process           │   │ 4 Symbolize   addresses -> names (DbgHelp)    │
  │ modules, .pdb, threads   │──▶│   Classify    names + reason -> category      │
- └──────────────────────────┘   │ 5 Report      text now, JSON later            │
+ └──────────────────────────┘   │ 5 Report      text                            │
                                 └──────────────────────────────────────────────┘
         Tests feed stage 3 directly with hand-written Event sequences.
 ```
 
-| Stage | Owns | Knows about Win32? | Proposed file |
-|---|---|---|---|
-| 1 Capture | Session lifetime, flags, buffers, stack opt-in, loss counters | Yes | `capture.cpp` |
-| 2 Decode | Payload layouts and opcodes; the only code that reads raw bytes | Yes | `decode.cpp` |
-| 3 Analysis | All timing and attribution logic | **No** | `analysis.h`, `analysis.cpp` |
-| 4 Symbolize / classify | DbgHelp, keyword rules, runtime-frame filter | Symbolize yes, classify no | `symbols.cpp`, `classify.cpp` |
-| 5 Report | Formatting only | No | `report.cpp` |
-| Entry point | Argument parsing, wiring, exit codes | Yes | `main.cpp` |
-| Tests | Synthetic event sequences against stage 3 and classify | No | `tests/analysis_tests.cpp` |
+The stages are how the code is organised, not a file each. Only one boundary buys
+anything: stage 3 must compile and run without Windows, so that CI can test it. That gives
+three files.
 
+| File | Holds | Windows calls? |
+|---|---|---|
+| `analysis.h` | Stage 3: typed events, thread state machine, stack matcher, waker, buckets. Header-only | **No** |
+| `waitwhy.cpp` | Everything else: capture, decoding, symbolization, classification, report, argument parsing | Yes |
+| `tests/analysis_tests.cpp` | Synthetic event sequences run against `analysis.h` | No |
+
+`analysis.h` is header-only so that the build stays `cl waitwhy.cpp` and `run-demo.ps1`
+does not change. The classification rules move into it when they first get a test (W9).
 Tests use plain asserts in a small `main`, so D3 (no third-party libraries) holds.
 
 ## 4. Deep dive
 
-### 4.1 Event contract between Decode and Analysis
+### 4.1 Event contract between the ETW callbacks and Analysis
 
 ```cpp
 struct SwitchEvent { uint64_t ts; uint32_t cpu, newTid, oldTid; int8_t oldState, oldWaitReason; };
@@ -83,8 +85,8 @@ struct StackEvent  { uint64_t eventTs; uint32_t tid; const uint64_t* frames; siz
 struct ThreadEvent { uint64_t ts; uint32_t pid, tid; bool started; };
 ```
 
-`byTid` and `fromDpc` are resolved in Decode (W3, W4), so Analysis never sees a CPU number
-or a header.
+The ETW callbacks in `waitwhy.cpp` read the raw payloads and build these. `byTid` and
+`fromDpc` are resolved there (W3, W4), so Analysis never sees a CPU number or a header.
 
 ### 4.2 Thread state machine (stage 3)
 
@@ -143,14 +145,14 @@ the user before anything is built.
 ### 4.4 Aggregation and memory
 
 Waits are folded into buckets as they complete; no per-event history is kept. The bucket key
-stays (thread, wait reason, stack). A bucket limit (for example 50,000) folds further new
-stacks into one "other" bucket per thread and prints a note, so memory stays bounded on a
-pathological target.
+stays (thread, wait reason, stack). Memory therefore grows with the number of distinct
+waits, not with the window length. There is no limit on the number of buckets; section 9
+says when to add one.
 
 ### 4.5 Command-line contract
 
 ```
-waitwhy (--pid N | --name program.exe) [--seconds N] [--top N] [--json FILE]
+waitwhy (--pid N | --name program.exe) [--seconds N] [--top N]
         [--dump-events FILE]
 ```
 
@@ -158,21 +160,19 @@ waitwhy (--pid N | --name program.exe) [--seconds N] [--top N] [--json FILE]
 |---|---|
 | 0 | Report produced |
 | 1 | Bad arguments or target not found |
-| 2 | Report produced, but data quality is poor (events lost, or most waits have no stack) |
-| 3 | Kernel trace session could not be started (W10) |
+| 2 | Kernel trace session could not be started (W10) |
 
-`--json` writes the same result model the text report is printed from. It gives CI stable
-assertions instead of matching report wording. It is a new feature and is not yet in
-`FEATURES.md`.
+Today every failure returns 1. Poor data quality (lost events, waits without a stack) is a
+printed warning and does not change the exit code: no threshold has been defined, and a busy
+CI runner that drops a few events would fail the build at random.
 
 ### 4.6 Failure handling
 
 | Failure | Handling |
 |---|---|
-| Session name already in use | Today: stop it. Proposed: a private system-logger session under waitwhy's own name (Windows 8+), so other tools are not disturbed |
-| waitwhy killed mid-trace | The next run finds and stops a leftover session with its own name |
+| Session name already in use | Stop it and print a note, as today and as the README documents. This also clears a session left behind when waitwhy was killed mid-trace |
 | Ctrl+C or target exits | Stop the session, then report on what was collected |
-| Events lost | Counted, printed, exit code 2 if significant |
+| Events lost | Counted and printed as a warning |
 | Target exits before symbolization | Report with addresses and a warning; later, capture module load addresses during the trace so names survive exit |
 | Stack never arrives | Wait is kept and labelled "no call stack recorded" (when a wait is given up on: 4.3) |
 
@@ -192,15 +192,15 @@ delivered, alongside the normal report:
 | StackWalk | header timestamp, `EventTimeStamp`, `StackThread`, kernel frame count, user frame count, first user address |
 
 It is added to the current single file, before any extraction, because 4.3 depends on its
-output. It stays afterwards as the way to turn a wrong report into a test case. It is a new
-feature and is not yet in `FEATURES.md`.
+output. It stays afterwards as the way to turn a wrong report into a test case. It is W12
+in `FEATURES.md`, proposed and not yet approved.
 
 ## 5. Scale and reliability
 
 | Concern | Approach |
 |---|---|
 | Event rate | First action in every callback is a thread-ID lookup; events for other processes exit immediately. No allocation on that path |
-| Kernel buffers | Sized from CPU count rather than fixed (today: 256 KB × up to 512 = 128 MB of non-paged memory regardless of machine) |
+| Kernel buffers | Fixed, as today: 256 KB × up to 512 = 128 MB of non-paged memory at most. Not measured; see section 9 |
 | Consumer falls behind | Detect through lost-event counters; do not try to hide it |
 | Thousands of threads | Hash maps keyed by thread ID; report shows the top N and a count of the rest |
 | Long windows | 64-bit tick counters; aggregation keeps memory flat |
@@ -214,10 +214,9 @@ buffers lost. These numbers are how a wrong report is noticed.
 
 | Decision | Gain | Cost |
 |---|---|---|
-| Split into stages and files | Analysis is testable in CI without Administrator; payload knowledge is in one place | Loses the "one file you can read top to bottom" property; build needs a file list |
+| Move the analysis into `analysis.h`; leave the rest in `waitwhy.cpp` | Analysis is testable in CI without Administrator; the build command does not change | Two files to read instead of one; `waitwhy.cpp` stays long |
 | Analysis free of Win32 | Deterministic tests for every review finding | A small typed-event layer to maintain |
 | Aggregate online, keep no event history | Flat memory, simple | Cannot re-analyse a run or show a timeline |
-| Private session instead of "NT Kernel Logger" | Coexists with other tools | Requires Windows 8+ (fine under D1); slightly different setup code |
 | System-wide capture, filter in user mode | Works with the plain kernel logger | Pays for every switch on the machine; the main limit on busy servers |
 | Plain-assert tests | No dependency (D3) | Less tooling than a test framework |
 | Dump real events before designing the stack matcher | The matcher is built on what Windows emits, not on a guess | One extra manual run by the user; W1 and W2 wait for it |
@@ -225,19 +224,19 @@ buffers lost. These numbers are how a wrong report is noticed.
 ## 7. Suggested order
 
 0. Safety net, before any code moves:
-   - Commit the pending move of `FEATURES.md` into `docs/`, so the working tree is clean.
-   - Add a GitHub Actions workflow that builds both programs (the build half of W11). There
-     is no workflow today.
+   - A GitHub Actions workflow builds both programs (the build half of W11):
+     `.github/workflows/build.yml`.
    - The user runs `run-demo.ps1` once; the output is committed as `docs/baseline-demo.txt`.
-   - Add `--dump-events` (4.7); the user runs it once against buggy `slowapp` and the dump
-     is committed.
+   - Add `--dump-events` (4.7, W12); the user runs it once against buggy `slowapp` and the
+     dump is committed.
 1. Decide the stack matcher (4.3) from the dump. Stop and ask if it contradicts W2.
-2. Extract Decode and Analysis, one stage per commit. After each, CI must build and the user
-   re-runs the demo.
+2. Move the analysis logic into `analysis.h` and add `tests/analysis_tests.cpp` to the CI
+   workflow. CI must build and the user re-runs the demo.
 3. Fix the review items one at a time, each with its own test (W1–W6, W8).
-4. Exit codes and `--json` (W10), then the CI smoke test (the rest of W11).
+4. Exit codes (W10), then the CI smoke test (the rest of W11). The smoke test matches three
+   pieces of report text: `main` blocked on a lock in `update_frame`, `saver` waiting on
+   the disk, and the "no significant blocking" line for the fixed run.
 5. End-of-window snapshot (W7), runtime-frame filter (W9).
-6. Private session and buffer sizing.
 
 "No behaviour change" in step 2 means the demo output matches the baseline in the C8
 outcome, in each thread's top wait category and in the function named for it. Timings and
@@ -262,5 +261,14 @@ Administrator shell on the affected machine.
 - **Offline analysis.** Reading a recorded `.etl` would allow replaying real traces in CI
   and analysing a trace taken elsewhere. It needs module-load events for symbolization.
 - **Multiple target processes.** Would extend C1; needs a decision first.
+- **JSON output.** `--json FILE` would give CI stable assertions. Add it only if matching
+  the report text in the smoke test proves fragile. It is not in `FEATURES.md`.
+- **Bucket limit.** If a target ever produces enough distinct wait stacks to matter, fold
+  new ones into one "other" bucket per thread. No target has shown this.
+- **Private trace session.** A system-logger session under waitwhy's own name (Windows 8+)
+  would stop waitwhy from ending other tools' "NT Kernel Logger" session. It changes
+  behaviour the README documents, so it needs a decision first.
+- **Buffer sizing.** Size kernel buffers from the CPU count if measurements show the fixed
+  128 MB is too much on small machines or too little on large ones.
 - **Kernel-side waits.** User frames only today; kernel frames would explain waits inside
   drivers but need kernel symbols.

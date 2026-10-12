@@ -79,6 +79,10 @@ approval before work begins; see the status log.
   not start the kernel session" apart from other failures. Serves C8.
 - **W11. CI build and smoke test.** A GitHub Actions workflow on `windows-latest` builds
   both programs and checks the C8 outcome for the buggy and fixed runs. Serves C8.
+- **W12. Raw event dump.** `--dump-events FILE` writes one text line per context-switch,
+  ReadyThread and StackWalk event for the target's threads, in the order the events are
+  delivered, alongside the normal report. Its output decides how stacks are matched to waits
+  (W1, W2) and supplies real event sequences for tests. Serves C5.
 
 ## Status log
 
@@ -86,3 +90,4 @@ Newest line last. Format: `YYYY-MM-DD  ID  status  note`.
 
 - 2026-10-12  C1–C8, D1–D6  recorded  From the project brief.
 - 2026-10-12  W1–W11  proposed  From the first code review; none approved yet.
+- 2026-10-12  W12  proposed  From the design audit; not approved yet.
