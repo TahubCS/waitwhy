@@ -1,0 +1,5 @@
+# Build output from cl.exe
+*.exe
+*.obj
+*.pdb
+*.ilk
