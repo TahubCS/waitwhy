@@ -98,3 +98,4 @@ Newest line last. Format: `YYYY-MM-DD  ID  status  note`.
 - 2026-10-12  W3  started  Implemented in waitwhy.cpp; waits for a demo run to confirm.
 - 2026-10-12  W4  started  Implemented in waitwhy.cpp; waits for a demo run to confirm.
 - 2026-10-12  W5  started  Implemented in waitwhy.cpp; waits for a demo run to confirm.
+- 2026-10-12  W6  started  Implemented in waitwhy.cpp; also counts running time for a thread already on a CPU at window start. Waits for a demo run to confirm.
