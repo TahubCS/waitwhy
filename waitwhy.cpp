@@ -135,15 +135,21 @@ struct OffCpu {
   uint64_t end = 0;
   int8_t reason = 0;       // kernel wait reason code
   bool isWait = false;     // true = blocked; false = preempted (it wanted the CPU)
-  bool closed = false;     // true once the thread got back on a CPU
-  bool hasStack = false;
   uint32_t wokenBy = kUnknownThread;
   std::vector<uint64_t> stack;  // user-mode return addresses, innermost first
 };
 
+// Upper limit on finished waits per thread that are still waiting for their call stack.
+// Beyond it the oldest one is recorded without a stack, so memory stays bounded.
+constexpr size_t kMaxWaitsAwaitingStack = 64;
+
 struct ThreadState {
-  bool active = false;  // `pending` holds an off-CPU period not yet recorded
-  OffCpu pending;
+  bool offCpu = false;  // `open` holds the period the thread is off the CPU right now
+  OffCpu open;
+  // Finished waits whose call stack has not arrived yet, keyed by the timestamp of the
+  // context switch that put the thread back on a CPU. The kernel records the stack for that
+  // switch, and the StackWalk event carries the same value as its EventTimeStamp.
+  std::map<uint64_t, OffCpu> awaitingStack;
   bool running = false;
   uint64_t runStart = 0;
   uint64_t runTicks = 0;
@@ -172,6 +178,8 @@ uint64_t g_firstTs = 0;
 uint64_t g_lastTs = 0;
 uint64_t g_contextSwitches = 0;
 uint64_t g_stacksAttached = 0;
+uint64_t g_waitsWithoutStack = 0;
+bool g_stacksOn = false;  // set before the trace is read; no stacks means no point waiting
 std::atomic<bool> g_stopRequested{false};
 
 uint64_t HashWait(int8_t reason, const std::vector<uint64_t>& stack) {
@@ -187,8 +195,7 @@ uint64_t HashWait(int8_t reason, const std::vector<uint64_t>& stack) {
   return h;
 }
 
-void Record(uint32_t tid, ThreadState& st, bool stillWaiting) {
-  const OffCpu& w = st.pending;
+void Record(uint32_t tid, ThreadState& st, const OffCpu& w, bool stillWaiting) {
   const uint64_t d = w.end > w.start ? w.end - w.start : 0;
   if (!w.isWait) {
     st.readyTicks += d;
@@ -207,10 +214,10 @@ void Record(uint32_t tid, ThreadState& st, bool stillWaiting) {
   if (w.wokenBy != kUnknownThread) b.wakers[w.wokenBy] += d;
 }
 
-// Records the pending off-CPU period if it is complete, then clears it.
-void Finalize(uint32_t tid, ThreadState& st) {
-  if (st.active && st.pending.closed) Record(tid, st, false);
-  st.active = false;
+// Records a finished wait whose call stack never arrived.
+void RecordWithoutStack(uint32_t tid, ThreadState& st, const OffCpu& w) {
+  ++g_waitsWithoutStack;
+  Record(tid, st, w, false);
 }
 
 void OnCSwitch(const EVENT_RECORD* ev, uint64_t ts) {
@@ -232,24 +239,33 @@ void OnCSwitch(const EVENT_RECORD* ev, uint64_t ts) {
       st.runTicks += ts - st.runStart;
       st.running = false;
     }
-    Finalize(c.oldThreadId, st);  // an earlier period whose stack never arrived
-    st.pending = OffCpu{};
-    st.pending.start = ts;
-    st.pending.reason = c.oldThreadWaitReason;
-    st.pending.isWait = (c.oldThreadState == kThreadStateWaiting);
-    st.active = true;
+    // Earlier waits still awaiting their stack stay in `awaitingStack`, separate from this one.
+    st.open = OffCpu{};
+    st.open.start = ts;
+    st.open.reason = c.oldThreadWaitReason;
+    st.open.isWait = (c.oldThreadState == kThreadStateWaiting);
+    st.offCpu = true;
   }
 
   // A thread of the target process gets back on a CPU.
   if (g_targetThreads.count(c.newThreadId)) {
     ThreadState& st = g_threads[c.newThreadId];
     st.seen = true;
-    if (st.active && !st.pending.closed) {
-      st.pending.end = ts;
-      st.pending.closed = true;
-      // Keep a blocked period open a little longer if its stack has not arrived yet;
-      // depending on the Windows version the stack is logged right after this event.
-      if (!st.pending.isWait || st.pending.hasStack) Finalize(c.newThreadId, st);
+    if (st.offCpu) {
+      st.open.end = ts;
+      st.offCpu = false;
+      if (!st.open.isWait || !g_stacksOn) {
+        Record(c.newThreadId, st, st.open, false);  // no stack needed, or none will come
+      } else {
+        // The stack for this wait is the one recorded for this switch-in, so it is matched
+        // by this timestamp. It is logged after this event, possibly much later.
+        st.awaitingStack.emplace(ts, std::move(st.open));
+        if (st.awaitingStack.size() > kMaxWaitsAwaitingStack) {
+          auto oldest = st.awaitingStack.begin();
+          RecordWithoutStack(c.newThreadId, st, oldest->second);
+          st.awaitingStack.erase(oldest);
+        }
+      }
     }
     st.running = true;
     st.runStart = ts;
@@ -262,12 +278,12 @@ void OnReadyThread(const EVENT_RECORD* ev) {
   std::memcpy(&readied, ev->UserData, sizeof readied);
   if (!g_targetThreads.count(readied)) return;
   ThreadState& st = g_threads[readied];
-  if (!st.active || st.pending.closed) return;
+  if (!st.offCpu) return;
   // The thread running on this CPU is the one that woke our thread up.
   const unsigned cpu = ev->BufferContext.ProcessorNumber;
   uint32_t by = cpu < g_cpuThread.size() ? g_cpuThread[cpu] : kUnknownThread;
   if (by == kUnknownThread) by = ev->EventHeader.ThreadId;
-  st.pending.wokenBy = by;
+  st.open.wokenBy = by;
 }
 
 void OnThreadStart(const EVENT_RECORD* ev) {
@@ -282,22 +298,28 @@ void OnStackWalk(const EVENT_RECORD* ev) {
   // Layout: uint64 EventTimeStamp, uint32 StackProcess, uint32 StackThread, then addresses.
   if (ev->UserDataLength < 16) return;
   const auto* p = static_cast<const uint8_t*>(ev->UserData);
+  uint64_t eventTs;
   uint32_t stackTid;
+  std::memcpy(&eventTs, p, sizeof eventTs);
   std::memcpy(&stackTid, p + 12, sizeof stackTid);
   if (!g_targetThreads.count(stackTid)) return;
   ThreadState& st = g_threads[stackTid];
-  if (!st.active || st.pending.hasStack) return;
+  // Only the wait that ended at the switch this stack was recorded for gets it. Stacks for
+  // other switches (after a preemption, or for a wait already recorded) are ignored.
+  auto it = st.awaitingStack.find(eventTs);
+  if (it == st.awaitingStack.end()) return;
 
+  OffCpu& w = it->second;
   const size_t ptrSize = (ev->EventHeader.Flags & EVENT_HEADER_FLAG_64_BIT_HEADER) ? 8 : 4;
   const size_t frames = (ev->UserDataLength - 16) / ptrSize;
   for (size_t i = 0; i < frames; ++i) {
     uint64_t addr = 0;
     std::memcpy(&addr, p + 16 + i * ptrSize, ptrSize);
-    if (addr != 0 && addr < kUserSpaceLimit) st.pending.stack.push_back(addr);
+    if (addr != 0 && addr < kUserSpaceLimit) w.stack.push_back(addr);
   }
-  st.pending.hasStack = true;
   ++g_stacksAttached;
-  if (st.pending.closed) Finalize(stackTid, st);
+  Record(stackTid, st, w, false);
+  st.awaitingStack.erase(it);
 }
 
 void WINAPI OnEvent(PEVENT_RECORD ev) {
@@ -320,14 +342,13 @@ void WINAPI OnEvent(PEVENT_RECORD ev) {
 void FlushAtEnd() {
   for (auto& [tid, st] : g_threads) {
     if (st.running && g_lastTs > st.runStart) st.runTicks += g_lastTs - st.runStart;
-    if (!st.active) continue;
-    if (st.pending.closed) {
-      Record(tid, st, false);
-    } else if (g_lastTs > st.pending.start) {
-      st.pending.end = g_lastTs;  // still off the CPU when the trace ended
-      Record(tid, st, true);
+    for (auto& entry : st.awaitingStack) RecordWithoutStack(tid, st, entry.second);
+    st.awaitingStack.clear();
+    if (st.offCpu && g_lastTs > st.open.start) {
+      st.open.end = g_lastTs;  // still off the CPU when the trace ended
+      Record(tid, st, st.open, true);
     }
-    st.active = false;
+    st.offCpu = false;
   }
 }
 
@@ -761,9 +782,11 @@ void PrintReport(double ticksPerSecond, int topN, const SessionProps& stopped, b
   if (!anyFinding)
     std::printf("  No thread lost a significant share of its time to blocking (sleeps excluded).\n");
 
-  std::printf("\n(%llu context switches seen, %llu call stacks matched)\n",
+  std::printf("\n(%llu context switches seen, %llu call stacks matched,"
+              " %llu waits without a call stack)\n",
               static_cast<unsigned long long>(g_contextSwitches),
-              static_cast<unsigned long long>(g_stacksAttached));
+              static_cast<unsigned long long>(g_stacksAttached),
+              static_cast<unsigned long long>(g_waitsWithoutStack));
 }
 
 void Usage() {
@@ -826,6 +849,7 @@ int wmain(int argc, wchar_t** argv) {
   }
   SetConsoleCtrlHandler(OnCtrl, TRUE);
   const bool stacksOn = EnableContextSwitchStacks(session);
+  g_stacksOn = stacksOn;
 
   EVENT_TRACE_LOGFILEW logfile{};
   logfile.LoggerName = const_cast<LPWSTR>(kLoggerName);
