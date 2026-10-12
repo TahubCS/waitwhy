@@ -307,10 +307,13 @@ void OnReadyThread(const EVENT_RECORD* ev) {
     st.open.wokenBy = kSystemWaker;
     return;
   }
-  // The thread running on this CPU is the one that woke our thread up.
-  const unsigned cpu = ev->BufferContext.ProcessorNumber;
-  uint32_t by = cpu < g_cpuThread.size() ? g_cpuThread[cpu] : kUnknownThread;
-  if (by == kUnknownThread) by = ev->EventHeader.ThreadId;
+  // The event is logged by the thread that readied ours, so its header names the waker.
+  // The thread last switched in on this CPU is the fallback when the header has no thread.
+  uint32_t by = ev->EventHeader.ThreadId;
+  if (by == kUnknownThread) {
+    const unsigned cpu = ev->BufferContext.ProcessorNumber;
+    by = cpu < g_cpuThread.size() ? g_cpuThread[cpu] : kUnknownThread;
+  }
   st.open.wokenBy = by;
 }
 
