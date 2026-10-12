@@ -35,6 +35,7 @@ was stuck in (DbgHelp + .pdb); and which thread woke it up.
 | `slowapp.cpp` | Test target with a deliberate bug: the `saver` thread holds a mutex during a slow disk write, so `main` blocks in `update_frame`. `--fixed` moves the write outside the lock. |
 | `run-demo.ps1` | Builds both programs (MSVC x64) and runs waitwhy against buggy, then fixed, slowapp. Needs an Administrator shell. |
 | `README.md` | User-facing description, demo instructions, known limitations. |
+| `DESIGN.md` | Proposed architecture (staged pipeline, testable analysis core). A proposal, not approved; `FEATURES.md` wins on any conflict. |
 | `FEATURES.md` | Append-only record of core features, decisions and work items. Read it before planning any change. |
 
 ## Build
