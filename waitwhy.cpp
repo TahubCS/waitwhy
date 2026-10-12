@@ -95,6 +95,8 @@ constexpr UCHAR kOpStackWalk = 32;     // inside the StackWalk class
 constexpr int kTraceStackTracingInfo = 3;  // TRACE_INFO_CLASS value
 constexpr int8_t kThreadStateWaiting = 5;  // KTHREAD_STATE: Waiting
 constexpr uint32_t kUnknownThread = 0xFFFFFFFFu;
+constexpr uint32_t kSystemWaker = 0;  // idle thread, or a DPC (timer, finished I/O)
+constexpr uint8_t kReadyFlagFromDpc = 0x1;  // ReadyThread Flag: readied from a DPC
 constexpr uint64_t kUserSpaceLimit = 0x0000800000000000ull;  // addresses above are kernel code
 
 #pragma pack(push, 1)
@@ -288,10 +290,9 @@ void OnReadyThread(const EVENT_RECORD* ev) {
   uint32_t readied;
   std::memcpy(&readied, ev->UserData, sizeof readied);
   if (!g_targetThreads.count(readied)) return;
+  // Payload: uint32 TThreadId, int8 AdjustReason, int8 AdjustIncrement, int8 Flag, int8 spare.
+  const uint8_t flag = ev->UserDataLength >= 7 ? static_cast<const uint8_t*>(ev->UserData)[6] : 0;
   if (g_dump) {
-    // Payload: uint32 TThreadId, int8 AdjustReason, int8 AdjustIncrement, int8 Flag, int8 spare.
-    const unsigned flag =
-        ev->UserDataLength >= 7 ? static_cast<const uint8_t*>(ev->UserData)[6] : 0u;
     std::fprintf(g_dump, "READY ts=%llu cpu=%u readied=%u headerThread=%u flag=0x%02x\n",
                  static_cast<unsigned long long>(ev->EventHeader.TimeStamp.QuadPart),
                  static_cast<unsigned>(ev->BufferContext.ProcessorNumber), readied,
@@ -300,6 +301,12 @@ void OnReadyThread(const EVENT_RECORD* ev) {
   }
   ThreadState& st = g_threads[readied];
   if (!st.offCpu) return;
+  // A DPC (a timer firing, an I/O finishing) borrows whatever thread happens to be on the
+  // CPU; that thread did not wake ours, the system did.
+  if (flag & kReadyFlagFromDpc) {
+    st.open.wokenBy = kSystemWaker;
+    return;
+  }
   // The thread running on this CPU is the one that woke our thread up.
   const unsigned cpu = ev->BufferContext.ProcessorNumber;
   uint32_t by = cpu < g_cpuThread.size() ? g_cpuThread[cpu] : kUnknownThread;
@@ -707,7 +714,7 @@ uint32_t TopWaker(const Bucket& b) {
 std::string WakerLabel(uint32_t tid) {
   if (tid == kUnknownThread) return "unknown";
   if (g_targetThreads.count(tid)) return ThreadLabel(tid);
-  if (tid == 0) return "the system (a timer or finished I/O)";
+  if (tid == kSystemWaker) return "the system (a timer or finished I/O)";
   return "outside your program (thread " + std::to_string(tid) + ")";
 }
 
