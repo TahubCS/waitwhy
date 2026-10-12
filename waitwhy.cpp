@@ -136,6 +136,7 @@ struct SessionProps {
 struct OffCpu {
   uint64_t start = 0;
   uint64_t end = 0;
+  uint64_t readyAt = 0;    // when another thread or the system readied it; 0 = not yet
   int8_t reason = 0;       // kernel wait reason code
   bool isWait = false;     // true = blocked; false = preempted (it wanted the CPU)
   uint32_t wokenBy = kUnknownThread;
@@ -202,11 +203,15 @@ uint64_t HashWait(int8_t reason, const std::vector<uint64_t>& stack) {
 }
 
 void Record(uint32_t tid, ThreadState& st, const OffCpu& w, bool stillWaiting) {
-  const uint64_t d = w.end > w.start ? w.end - w.start : 0;
   if (!w.isWait) {
-    st.readyTicks += d;
+    st.readyTicks += w.end > w.start ? w.end - w.start : 0;  // preempted: wanted the CPU
     return;
   }
+  // A wait ends when the thread is readied; from then until it is back on a CPU it only
+  // wanted a CPU, so that part counts as ready time, not as waiting.
+  const uint64_t waitEnd = (w.readyAt > w.start && w.readyAt < w.end) ? w.readyAt : w.end;
+  const uint64_t d = waitEnd > w.start ? waitEnd - w.start : 0;
+  st.readyTicks += w.end > waitEnd ? w.end - waitEnd : 0;
   st.waitTicks += d;
   Bucket& b = g_buckets[{tid, HashWait(w.reason, w.stack)}];
   if (b.count == 0) {
@@ -301,6 +306,8 @@ void OnReadyThread(const EVENT_RECORD* ev) {
   }
   ThreadState& st = g_threads[readied];
   if (!st.offCpu) return;
+  if (st.open.readyAt == 0)
+    st.open.readyAt = static_cast<uint64_t>(ev->EventHeader.TimeStamp.QuadPart);
   // A DPC (a timer firing, an I/O finishing) borrows whatever thread happens to be on the
   // CPU; that thread did not wake ours, the system did.
   if (flag & kReadyFlagFromDpc) {
