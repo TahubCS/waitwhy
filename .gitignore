@@ -1,5 +1,62 @@
-# Build output from cl.exe
+# Executables and libraries
 *.exe
+*.dll
+*.lib
+*.exp
+
+# Compiler and linker output (cl.exe / link.exe)
 *.obj
+*.o
 *.pdb
 *.ilk
+*.idb
+*.pch
+*.ipch
+*.iobj
+*.ipdb
+*.map
+*.res
+*.manifest
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.sdf
+*.opensdf
+*.VC.db
+*.VC.opendb
+*.tlog
+*.lastbuildstate
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+build/
+out/
+
+# VS Code
+.vscode/
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# Trace recordings and crash dumps
+*.etl
+*.dmp
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak
+*.swp
+*~
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# macOS
+.DS_Store
