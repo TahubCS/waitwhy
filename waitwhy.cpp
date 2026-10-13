@@ -180,6 +180,7 @@ uint64_t g_lastTs = 0;
 uint64_t g_contextSwitches = 0;
 uint64_t g_stacksAttached = 0;
 uint64_t g_waitsWithoutStack = 0;
+uint64_t g_kernelOnlyFragments = 0;  // stack events for a wait that held no user-mode frame
 bool g_stacksOn = false;  // set before the trace is read; no stacks means no point waiting
 std::atomic<bool> g_stopRequested{false};
 FILE* g_dump = nullptr;   // --dump-events output; null when not asked for
@@ -352,11 +353,20 @@ void OnStackWalk(const EVENT_RECORD* ev) {
   auto it = st.awaitingStack.find(eventTs);
   if (it == st.awaitingStack.end()) return;
 
+  // One stack can arrive as two events with the same EventTimeStamp: the kernel part,
+  // logged at the switch, and the user part, logged once the thread is back in user mode.
+  // Only user-mode frames are kept, so a fragment without any is skipped and the wait keeps
+  // waiting for the rest of its stack.
   OffCpu& w = it->second;
+  const size_t framesBefore = w.stack.size();
   for (size_t i = 0; i < frames; ++i) {
     uint64_t addr = 0;
     std::memcpy(&addr, p + 16 + i * ptrSize, ptrSize);
     if (addr != 0 && addr < kUserSpaceLimit) w.stack.push_back(addr);
+  }
+  if (w.stack.size() == framesBefore) {
+    ++g_kernelOnlyFragments;
+    return;
   }
   ++g_stacksAttached;
   Record(stackTid, st, w, false);
@@ -824,10 +834,11 @@ void PrintReport(double ticksPerSecond, int topN, const SessionProps& stopped, b
     std::printf("  No thread lost a significant share of its time to blocking (sleeps excluded).\n");
 
   std::printf("\n(%llu context switches seen, %llu call stacks matched,"
-              " %llu waits without a call stack)\n",
+              " %llu waits without a call stack, %llu kernel-only stack parts)\n",
               static_cast<unsigned long long>(g_contextSwitches),
               static_cast<unsigned long long>(g_stacksAttached),
-              static_cast<unsigned long long>(g_waitsWithoutStack));
+              static_cast<unsigned long long>(g_waitsWithoutStack),
+              static_cast<unsigned long long>(g_kernelOnlyFragments));
 }
 
 void Usage() {

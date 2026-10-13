@@ -94,3 +94,4 @@ Newest line last. Format: `YYYY-MM-DD  ID  status  note`.
 - 2026-10-12  W2  started  Approved by the user. Implemented in waitwhy.cpp; waits for a demo run to confirm.
 - 2026-10-12  W1–W12  approved  By the user after the first demo run (lock found, no stacks resolved).
 - 2026-10-12  W12  started  Implemented as `--dump-events FILE` in waitwhy.cpp; waits for a demo run to confirm.
+- 2026-10-12  W1  started  Implemented in waitwhy.cpp on top of W2: a wait is recorded once its user-mode stack part arrives; waits for a demo run to confirm.
