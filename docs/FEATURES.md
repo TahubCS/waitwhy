@@ -102,3 +102,4 @@ Newest line last. Format: `YYYY-MM-DD  ID  status  note`.
 - 2026-10-12  W7  started  Implemented in waitwhy.cpp: stack snapshot after the trace stops for threads still off the CPU or blocked the whole window; waits for a demo run to confirm.
 - 2026-10-13  W8  started  Implemented in waitwhy.cpp; also stops W6 from opening a window-start period for a thread created during the trace. Waits for a demo run to confirm.
 - 2026-10-13  W9  started  Implemented in waitwhy.cpp; waits for a demo run to confirm.
+- 2026-10-13  W10  started  Implemented in waitwhy.cpp: exit code 2 when the kernel trace cannot be started; waits for a demo run to confirm.
