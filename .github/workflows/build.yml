@@ -24,6 +24,15 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "slowapp.cpp did not compile" }
           cl /nologo /EHsc /O2 /Zi /std:c++17 waitwhy.cpp /Fe:waitwhy.exe
           if ($LASTEXITCODE -ne 0) { throw "waitwhy.cpp did not compile" }
+          cl /nologo /EHsc /O2 /std:c++17 /DWAITWHY_NO_MAIN tests\replay_events.cpp /Fe:replay_events.exe
+          if ($LASTEXITCODE -ne 0) { throw "tests\replay_events.cpp did not compile" }
+
+      # Replays a recorded trace through waitwhy's event handlers; needs no kernel trace.
+      - name: Replay recorded trace
+        shell: pwsh
+        run: |
+          .\replay_events.exe docs\traces\buggy-64mb-events.txt
+          if ($LASTEXITCODE -ne 0) { throw "replaying docs\traces\buggy-64mb-events.txt failed" }
 
       # C8 smoke test: waitwhy must report the lock bug in buggy slowapp and nothing in fixed
       # slowapp. GitHub's Windows runners run as Administrator, which kernel tracing needs.

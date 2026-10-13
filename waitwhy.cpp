@@ -1050,6 +1050,9 @@ void Usage() {
 
 }  // namespace
 
+// tests/replay_events.cpp includes this file to drive the event handlers with recorded
+// events, and brings its own main.
+#ifndef WAITWHY_NO_MAIN
 int wmain(int argc, wchar_t** argv) {
   SetConsoleOutputCP(CP_UTF8);
   std::wstring name;
@@ -1169,3 +1172,4 @@ int wmain(int argc, wchar_t** argv) {
   PrintReport(static_cast<double>(freq.QuadPart), topN, stopped, stacksOn);
   return kExitOk;
 }
+#endif  // WAITWHY_NO_MAIN
