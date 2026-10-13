@@ -1,0 +1,150 @@
+Watching PID 36740 (4 threads) for 8 seconds........
+Wrote 8371 events to buggy-events.txt.
+
+==============================================================
+ waitwhy report: slowapp.exe (PID 36740), watched for 9.00 s
+==============================================================
+
+Where each thread's time went
+  Thread                            Running    Waiting   Wanted CPU
+  Thread 32668                           0%       100%           0%
+  Thread 24424 (ticker)                  0%       100%           0%
+  Thread 37808 (main)                    0%        99%           0%
+  Thread 29716 (saver)                  16%        84%           0%
+
+Biggest waits
+
+  #1  Thread 32668  waited 9.00 s (100% of the time) over 1 wait(s), still waiting at the end
+      Waiting on : something else
+      Your code  : (not in your program's code)
+      Blocked in : ntdll!TpCallbackMayRunLong
+      Woken by   : unknown
+      Wait reason: not known (already blocked when the trace started)
+
+  #2  Thread 24424 (ticker)  waited 8.91 s (99% of the time) over 35 wait(s), still waiting at the end
+      Waiting on : an intentional sleep or timer
+      Your code  : slowapp!`anonymous namespace'::ticker_thread
+      Blocked in : ntdll!RtlDelayExecution
+      Woken by   : the system (a timer or finished I/O)
+      Wait reason: DelayExecution (kernel code 4)
+
+  #3  Thread 37808 (main)  waited 7.21 s (80% of the time) over 463 wait(s), still waiting at the end
+      Waiting on : an intentional sleep or timer
+      Your code  : slowapp!main
+      Blocked in : ntdll!RtlDelayExecution
+      Woken by   : the system (a timer or finished I/O)
+      Wait reason: DelayExecution (kernel code 4)
+
+  #4  Thread 29716 (saver)  waited 6.89 s (77% of the time) over 34 wait(s), still waiting at the end
+      Waiting on : an intentional sleep or timer
+      Your code  : slowapp!`anonymous namespace'::saver_thread
+      Blocked in : ntdll!RtlDelayExecution
+      Woken by   : the system (a timer or finished I/O)
+      Wait reason: DelayExecution (kernel code 4)
+
+  #5  Thread 37808 (main)  waited 1.70 s (19% of the time) over 34 wait(s)
+      Waiting on : a lock held by another thread
+      Your code  : slowapp!`anonymous namespace'::update_frame
+      Blocked in : ntdll!RtlSleepConditionVariableSRW
+      Woken by   : Thread 29716 (saver)
+      Wait reason: WrAlertByThreadId (kernel code 37)
+
+  #6  Thread 29716 (saver)  waited 356 ms (4% of the time) over 701 wait(s)
+      Waiting on : something else
+      Your code  : (not in your program's code)
+      Blocked in : (no call stack recorded)
+      Woken by   : the system (a timer or finished I/O)
+      Wait reason: Executive (kernel code 0)
+
+  #7  Thread 29716 (saver)  waited 171 ms (2% of the time) over 1 wait(s)
+      Waiting on : an intentional sleep or timer
+      Your code  : slowapp!`anonymous namespace'::saver_thread
+      Blocked in : ntdll!RtlDelayExecution
+      Woken by   : the system (a timer or finished I/O)
+      Wait reason: not known (already blocked when the trace started)
+
+  #8  Thread 29716 (saver)  waited 128 ms (1% of the time) over 203 wait(s)
+      Waiting on : the disk (file read/write/flush)
+      Your code  : slowapp!`anonymous namespace'::write_settings_to_disk
+      Blocked in : KERNELBASE!WriteFile
+      Woken by   : the system (a timer or finished I/O)
+      Wait reason: Executive (kernel code 0)
+
+  #9  Thread 24424 (ticker)  waited 79 ms (1% of the time) over 1 wait(s)
+      Waiting on : an intentional sleep or timer
+      Your code  : slowapp!`anonymous namespace'::ticker_thread
+      Blocked in : ntdll!RtlDelayExecution
+      Woken by   : the system (a timer or finished I/O)
+      Wait reason: not known (already blocked when the trace started)
+
+  #10  Thread 37808 (main)  waited 30 ms (0% of the time) over 2 wait(s)
+      Waiting on : an intentional sleep or timer
+      Your code  : (not in your program's code)
+      Blocked in : (no call stack recorded)
+      Woken by   : the system (a timer or finished I/O)
+      Wait reason: DelayExecution (kernel code 4)
+
+  #11  Thread 37808 (main)  waited 9 ms (0% of the time) over 1 wait(s)
+      Waiting on : something else
+      Your code  : (not in your program's code)
+      Blocked in : (no call stack recorded)
+      Woken by   : the system (a timer or finished I/O)
+      Wait reason: not known (already blocked when the trace started)
+
+  #12  Thread 37808 (main)  waited 2 ms (0% of the time) over 8 wait(s)
+      Waiting on : the disk (file read/write/flush)
+      Your code  : slowapp!main
+      Blocked in : KERNELBASE!WriteFile
+      Woken by   : outside your program (thread 33916)
+      Wait reason: Executive (kernel code 0)
+
+  #13  Thread 29716 (saver)  waited 1 ms (0% of the time) over 34 wait(s)
+      Waiting on : the disk (file read/write/flush)
+      Your code  : slowapp!`anonymous namespace'::write_settings_to_disk
+      Blocked in : KERNELBASE!FlushFileBuffers
+      Woken by   : the system (a timer or finished I/O)
+      Wait reason: Executive (kernel code 0)
+
+  #14  Thread 29716 (saver)  waited 1 ms (0% of the time) over 34 wait(s)
+      Waiting on : something else
+      Your code  : slowapp!`anonymous namespace'::write_settings_to_disk
+      Blocked in : KERNELBASE!CloseHandle
+      Woken by   : the system (a timer or finished I/O)
+      Wait reason: Executive (kernel code 0)
+
+  #15  Thread 37808 (main)  waited 1 ms (0% of the time) over 5 wait(s)
+      Waiting on : something else
+      Your code  : (not in your program's code)
+      Blocked in : (no call stack recorded)
+      Woken by   : the system (a timer or finished I/O)
+      Wait reason: Executive (kernel code 0)
+
+  #16  Thread 24424 (ticker)  waited 0 ms (0% of the time) over 1 wait(s)
+      Waiting on : something else
+      Your code  : (not in your program's code)
+      Blocked in : (no call stack recorded)
+      Woken by   : the system (a timer or finished I/O)
+      Wait reason: Executive (kernel code 0)
+
+  #17  Thread 29716 (saver)  waited 0 ms (0% of the time) over 1 wait(s)
+      Waiting on : the disk (file read/write/flush)
+      Your code  : slowapp!`anonymous namespace'::write_settings_to_disk
+      Blocked in : KERNELBASE!GetDriveTypeW
+      Woken by   : the system (a timer or finished I/O)
+      Wait reason: Executive (kernel code 0)
+
+  #18  Thread 29716 (saver)  waited 0 ms (0% of the time) over 1 wait(s)
+      Waiting on : something else
+      Your code  : (not in your program's code)
+      Blocked in : (no call stack recorded)
+      Woken by   : outside your program (thread 33944)
+      Wait reason: WrResource (kernel code 27)
+
+What this means
+  * Thread 32668 spent 100% of the time waiting, in (not in your program's code).
+  * Thread 37808 (main) spent 19% of the time waiting for a lock that another thread was holding, in slowapp!`anonymous namespace'::update_frame.
+    The lock was released by Thread 29716 (saver), which spends its time waiting for the disk, in slowapp!`anonymous namespace'::write_settings_to_disk.
+    It is most likely holding the lock during that slow work. Move the
+    slow work outside the lock (copy the data first, then do the work).
+
+(323498 context switches seen, 845 call stacks matched, 711 waits without a call stack, 1552 kernel-only stack parts)
