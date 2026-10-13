@@ -826,6 +826,14 @@ Category Classify(const Bucket& b, Symbolizer& sym) {
   if (HasAny(all, {"!sleep\n", "!sleepex\n", "!ntdelayexecution"}) || b.reason == 4 ||
       b.reason == 11)
     return Category::Sleep;
+  // The program's own calls into the C++ runtime and the lock APIs say more than the
+  // innermost frames: ntdll often resolves only to its nearest exported name, so a blocked
+  // AcquireSRWLockExclusive can show up as RtlSleepConditionVariableSRW. A condition variable
+  // wait also names its mutex, so it is checked first.
+  if (HasAny(all, {"condition_variable", "cnd_wait"})) return Category::OtherThread;
+  if (HasAny(all, {"mutex::lock", "mtx_lock", "mtx_do_lock", "acquiresrwlockexclusive",
+                   "acquiresrwlockshared", "entercriticalsection"}))
+    return Category::Lock;
   if (HasAny(all, {"sleepconditionvariable", "!waitforsingleobject", "!waitformultipleobjects",
                    "::join", "!getqueuedcompletionstatus", "_thrd_join"}))
     return Category::OtherThread;
@@ -990,6 +998,7 @@ void PrintReport(double ticksPerSecond, int topN, const SessionProps& stopped, b
           if (wb->tid != waker) continue;
           Category wc = category[wb];
           if (wc == Category::Lock || wc == Category::Sleep) continue;
+          if (wb->stack.empty()) continue;  // nothing to say about where its time went
           std::printf("    The lock was released by %s, which spends its time %s, in %s.\n",
                       ThreadLabel(waker).c_str(), CategorySentence(wc),
                       YourCodeFrame(*wb, sym).c_str());

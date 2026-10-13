@@ -83,6 +83,12 @@ approval before work begins; see the status log.
   ReadyThread and StackWalk event for the target's threads, in the order the events are
   delivered, alongside the normal report. Its output decides how stacks are matched to waits
   (W1, W2) and supplies real event sequences for tests. Serves C5.
+- **W13. Classify lock waits from the program's own runtime calls.** Decide between a lock
+  and a condition variable from the program's calls into the C++ runtime and the lock APIs
+  (`std::mutex::lock`, `_Mtx_lock`, `AcquireSRWLockExclusive`, `EnterCriticalSection`;
+  `std::condition_variable`, `_Cnd_wait`) before generic wait-function names, which ntdll
+  may only resolve to its nearest exported name. When explaining who held a lock, skip the
+  releasing thread's waits that have no call stack. Serves C4, C7, C8.
 
 ## Status log
 
@@ -104,3 +110,5 @@ Newest line last. Format: `YYYY-MM-DD  ID  status  note`.
 - 2026-10-13  W9  started  Implemented in waitwhy.cpp; waits for a demo run to confirm.
 - 2026-10-13  W10  started  Implemented in waitwhy.cpp: exit code 2 when the kernel trace cannot be started; waits for a demo run to confirm.
 - 2026-10-13  W11  started  Smoke test added to .github/workflows/build.yml; skips with a warning when the runner cannot trace (exit code 2, W10).
+- 2026-10-13  W13  proposed  From the first W11 CI run: main's lock wait in update_frame was labelled "another thread or an event".
+- 2026-10-13  W13  started  The user asked for the failing W11 branch to be fixed. Implemented in waitwhy.cpp.
