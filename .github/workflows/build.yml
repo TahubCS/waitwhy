@@ -52,15 +52,20 @@ jobs:
           $buggy = Watch-Slowapp 'buggy' @()
           $fixed = Watch-Slowapp 'fixed' @('--fixed')
 
+          # Function names can carry a namespace, e.g. slowapp!`anonymous namespace'::update_frame.
+          # In the fixed run saver still waits on the disk, which is fine; only the lock must go.
           $failures = @()
-          if ($buggy -notmatch '\(main\) spent \d+% of the time waiting for a lock that another thread was holding, in slowapp!update_frame\.') {
+          if ($buggy -notmatch '\(main\) spent \d+% of the time waiting for a lock that another thread was holding, in slowapp!.*update_frame\.') {
             $failures += 'Buggy run: main is not reported as blocked on a lock in update_frame.'
           }
-          if ($buggy -notmatch '\(saver\), which spends its time waiting for the disk, in slowapp!write_settings_to_disk\.') {
+          if ($buggy -notmatch 'The lock was released by Thread \d+ \(saver\)') {
+            $failures += 'Buggy run: saver is not named as the thread that released the lock.'
+          }
+          if ($buggy -notmatch '\(saver\).* waiting for the disk, in slowapp!.*write_settings_to_disk\.') {
             $failures += 'Buggy run: saver is not reported as waiting for the disk in write_settings_to_disk.'
           }
-          if ($fixed -notmatch 'No thread lost a significant share of its time to blocking') {
-            $failures += 'Fixed run: waitwhy reported blocking where there should be none.'
+          if ($fixed -match 'waiting for a lock that another thread was holding') {
+            $failures += 'Fixed run: a thread is still reported as blocked on a lock.'
           }
           foreach ($f in $failures) { Write-Host "::error::$f" }
           if ($failures.Count -gt 0) { exit 1 }
