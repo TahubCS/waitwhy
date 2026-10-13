@@ -93,3 +93,11 @@ Newest line last. Format: `YYYY-MM-DD  ID  status  note`.
 - 2026-10-12  W12  proposed  From the design audit; not approved yet.
 - 2026-10-12  W2  started  Approved by the user. Implemented in waitwhy.cpp; waits for a demo run to confirm.
 - 2026-10-12  W1–W12  approved  By the user after the first demo run (lock found, no stacks resolved).
+- 2026-10-12  W12  started  Implemented as `--dump-events FILE` in waitwhy.cpp; waits for a demo run to confirm.
+- 2026-10-12  W1  started  Implemented in waitwhy.cpp on top of W2: a wait is recorded once its user-mode stack part arrives; waits for a demo run to confirm.
+- 2026-10-12  W3  started  Implemented in waitwhy.cpp; waits for a demo run to confirm.
+- 2026-10-12  W4  started  Implemented in waitwhy.cpp; waits for a demo run to confirm.
+- 2026-10-12  W5  started  Implemented in waitwhy.cpp; waits for a demo run to confirm.
+- 2026-10-12  W6  started  Implemented in waitwhy.cpp; also counts running time for a thread already on a CPU at window start. Waits for a demo run to confirm.
+- 2026-10-12  W7  started  Implemented in waitwhy.cpp: stack snapshot after the trace stops for threads still off the CPU or blocked the whole window; waits for a demo run to confirm.
+- 2026-10-13  W8  started  Implemented in waitwhy.cpp; also stops W6 from opening a window-start period for a thread created during the trace. Waits for a demo run to confirm.

@@ -50,6 +50,12 @@ If your disk is very fast and the buggy numbers look small, start slowapp with m
 .\waitwhy.exe --pid 1234 --top 10
 ```
 
+To see the raw kernel events behind a report, add `--dump-events FILE`. It writes one line per context switch, ready-thread and call-stack event of the program's threads, in the order Windows delivered them, and still prints the normal report:
+
+```powershell
+.\waitwhy.exe --name slowapp.exe --seconds 5 --dump-events dump.txt
+```
+
 Function names only show up for programs that have `.pdb` symbol files next to them (your own debug or `/Zi` builds). For other programs you will see Windows function names (for example `KERNELBASE!ReadFile`) and addresses.
 
 ## How it works
@@ -65,7 +71,7 @@ Function names only show up for programs that have `.pdb` symbol files next to t
 |---|---|
 | Needs Administrator | Kernel tracing is a privileged feature |
 | Uses the single system-wide "NT Kernel Logger" session | If another tool (for example Process Explorer) is using it, waitwhy stops that session first and prints a note |
-| A thread blocked for the whole window never switches, so it produces no events | It is reported as "never ran during the window" without details |
+| A thread blocked for the whole window never switches, so it produces no events | Its location comes from one snapshot of its stack, taken when the trace ends (the thread is paused for the moment that takes); its wait reason is shown as "not known" |
 | Wake-ups from hardware interrupts (a disk or network card finishing) | Shown as "the system" or "outside your program" instead of a specific cause |
 | Very busy machines generate huge numbers of events | Windows may drop some; waitwhy prints a warning when it does |
 | Category labels come from function-name keywords | Unusual libraries can end up labeled "something else" |
