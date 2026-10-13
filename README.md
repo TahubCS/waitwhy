@@ -58,6 +58,14 @@ To see the raw kernel events behind a report, add `--dump-events FILE`. It write
 
 Function names only show up for programs that have `.pdb` symbol files next to them (your own debug or `/Zi` builds). For other programs you will see Windows function names (for example `KERNELBASE!ReadFile`) and addresses.
 
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | The report was printed |
+| 1 | Bad arguments, or the program to watch was not found |
+| 2 | The kernel trace could not be started (not run as Administrator, or tracing is unavailable on this machine) |
+
 ## How it works
 
 1. Starts the Windows kernel trace session ("NT Kernel Logger") with three kinds of events: **context switch** (a thread stops or starts running on a CPU), **ready thread** (one thread wakes another), and **thread start**.

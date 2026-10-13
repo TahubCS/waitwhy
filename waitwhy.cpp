@@ -98,6 +98,11 @@ constexpr int8_t kThreadStateTerminated = 4;  // KTHREAD_STATE: Terminated
 constexpr int8_t kThreadStateWaiting = 5;  // KTHREAD_STATE: Waiting
 constexpr int8_t kReasonUnknown = -1;      // our marker: blocked since before the trace began
 constexpr uint32_t kUnknownThread = 0xFFFFFFFFu;
+
+// Exit codes, so that scripts and CI can tell the failures apart.
+constexpr int kExitOk = 0;
+constexpr int kExitUsage = 1;             // bad arguments, or the program cannot be found
+constexpr int kExitTraceUnavailable = 2;  // the kernel trace session could not be started
 constexpr uint32_t kSystemWaker = 0;  // idle thread, or a DPC (timer, finished I/O)
 constexpr uint8_t kReadyFlagFromDpc = 0x1;  // ReadyThread Flag: readied from a DPC
 constexpr uint64_t kUserSpaceLimit = 0x0000800000000000ull;  // addresses above are kernel code
@@ -1021,7 +1026,9 @@ void Usage() {
       "  Watches a running program and reports what its threads were waiting on.\n"
       "  --dump-events also writes every context-switch, ready-thread and stack event\n"
       "  of the program's threads to FILE, one line each, in the order they arrived.\n"
-      "  Must be run as Administrator.\n");
+      "  Must be run as Administrator.\n"
+      "  Exit codes: 0 report printed, 1 bad arguments or program not found,\n"
+      "  2 the kernel trace could not be started (not Administrator, or unavailable).\n");
 }
 
 }  // namespace
@@ -1047,21 +1054,21 @@ int wmain(int argc, wchar_t** argv) {
       dumpPath = argv[++i];
     } else {
       Usage();
-      return 1;
+      return kExitUsage;
     }
   }
   if (!name.empty() && !FindProcessByName(name, &g_pid)) {
     std::printf("No running process named %s.\n", Narrow(name).c_str());
-    return 1;
+    return kExitUsage;
   }
   if (g_pid == 0) {
     Usage();
-    return 1;
+    return kExitUsage;
   }
   HANDLE target = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, g_pid);
   if (!target) {
     std::printf("Cannot open PID %u. Is it running, and are you running as Administrator?\n", g_pid);
-    return 1;
+    return kExitUsage;
   }
   SnapshotThreads(g_pid);
 
@@ -1073,7 +1080,7 @@ int wmain(int argc, wchar_t** argv) {
     if (!g_dump) {
       std::printf("Cannot write the event dump to %s.\n", Narrow(dumpPath).c_str());
       CloseHandle(target);
-      return 1;
+      return kExitUsage;
     }
     std::setvbuf(g_dump, nullptr, _IOFBF, 1 << 20);
     std::fprintf(g_dump,
@@ -1090,11 +1097,11 @@ int wmain(int argc, wchar_t** argv) {
   ULONG rc = StartKernelSession(&session);
   if (rc == ERROR_ACCESS_DENIED) {
     std::printf("Access denied. Run waitwhy from an Administrator PowerShell window.\n");
-    return 1;
+    return kExitTraceUnavailable;
   }
   if (rc != ERROR_SUCCESS) {
     std::printf("Could not start the kernel trace session (error %lu).\n", rc);
-    return 1;
+    return kExitTraceUnavailable;
   }
   SetConsoleCtrlHandler(OnCtrl, TRUE);
   const bool stacksOn = EnableContextSwitchStacks(session);
@@ -1109,7 +1116,7 @@ int wmain(int argc, wchar_t** argv) {
   if (consumer == INVALID_PROCESSTRACE_HANDLE) {
     std::printf("Could not open the trace for reading (error %lu).\n", GetLastError());
     StopKernelSession();
-    return 1;
+    return kExitTraceUnavailable;
   }
   std::thread reader([&consumer] { ProcessTrace(&consumer, 1, nullptr, nullptr); });
 
@@ -1143,5 +1150,5 @@ int wmain(int argc, wchar_t** argv) {
   if (g_firstTs != 0) SnapshotThreadsStillBlocked();
   FlushAtEnd();
   PrintReport(static_cast<double>(freq.QuadPart), topN, stopped, stacksOn);
-  return 0;
+  return kExitOk;
 }
