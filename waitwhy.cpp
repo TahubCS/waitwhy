@@ -87,12 +87,14 @@ const GUID kStackWalkGuid = {
 
 // Event types (opcodes) inside the kernel's Thread event class.
 constexpr UCHAR kOpThreadStart = 1;
+constexpr UCHAR kOpThreadEnd = 2;
 constexpr UCHAR kOpThreadDcStart = 3;  // "already running when the trace started"
 constexpr UCHAR kOpCSwitch = 36;
 constexpr UCHAR kOpReadyThread = 50;
 constexpr UCHAR kOpStackWalk = 32;     // inside the StackWalk class
 
 constexpr int kTraceStackTracingInfo = 3;  // TRACE_INFO_CLASS value
+constexpr int8_t kThreadStateTerminated = 4;  // KTHREAD_STATE: Terminated
 constexpr int8_t kThreadStateWaiting = 5;  // KTHREAD_STATE: Waiting
 constexpr int8_t kReasonUnknown = -1;      // our marker: blocked since before the trace began
 constexpr uint32_t kUnknownThread = 0xFFFFFFFFu;
@@ -176,6 +178,7 @@ struct Bucket {
 
 uint32_t g_pid = 0;
 std::unordered_set<uint32_t> g_targetThreads;
+std::unordered_set<uint32_t> g_exitedThreads;  // the program's threads that ended while traced
 std::unordered_map<uint32_t, ThreadState> g_threads;
 std::map<std::pair<uint32_t, uint64_t>, Bucket> g_buckets;
 std::vector<uint32_t> g_cpuThread(256, kUnknownThread);  // thread currently on each CPU
@@ -274,12 +277,15 @@ void OnCSwitch(const EVENT_RECORD* ev, uint64_t ts) {
       st.runTicks += ts - st.runStart;
       st.running = false;
     }
-    // Earlier waits still awaiting their stack stay in `awaitingStack`, separate from this one.
-    st.open = OffCpu{};
-    st.open.start = ts;
-    st.open.reason = c.oldThreadWaitReason;
-    st.open.isWait = (c.oldThreadState == kThreadStateWaiting);
-    st.offCpu = true;
+    // An exited thread never comes back, so there is no off-CPU period to open.
+    if (c.oldThreadState != kThreadStateTerminated) {
+      // Earlier waits still awaiting their stack stay in `awaitingStack`, separate from this.
+      st.open = OffCpu{};
+      st.open.start = ts;
+      st.open.reason = c.oldThreadWaitReason;
+      st.open.isWait = (c.oldThreadState == kThreadStateWaiting);
+      st.offCpu = true;
+    }
   }
 
   // A thread of the target process gets back on a CPU.
@@ -343,12 +349,40 @@ void OnReadyThread(const EVENT_RECORD* ev) {
   st.open.wokenBy = by;
 }
 
-void OnThreadStart(const EVENT_RECORD* ev) {
-  if (ev->UserDataLength < 2 * sizeof(uint32_t)) return;
+// Thread start, end and rundown events all begin with uint32 ProcessId, uint32 TThreadId.
+bool ReadThreadEvent(const EVENT_RECORD* ev, uint32_t* pid, uint32_t* tid) {
+  if (ev->UserDataLength < 2 * sizeof(uint32_t)) return false;
+  std::memcpy(pid, ev->UserData, sizeof *pid);
+  std::memcpy(tid, static_cast<const uint8_t*>(ev->UserData) + 4, sizeof *tid);
+  return true;
+}
+
+// `created` is true for a thread created during the trace, false for the rundown of threads
+// that already existed when it started.
+void OnThreadStart(const EVENT_RECORD* ev, bool created) {
   uint32_t pid, tid;
-  std::memcpy(&pid, ev->UserData, sizeof pid);
-  std::memcpy(&tid, static_cast<const uint8_t*>(ev->UserData) + 4, sizeof tid);
-  if (pid == g_pid) g_targetThreads.insert(tid);
+  if (!ReadThreadEvent(ev, &pid, &tid) || pid != g_pid) return;
+  g_targetThreads.insert(tid);
+  g_exitedThreads.erase(tid);
+  // A new thread was not blocked or running before the trace, so the window-start periods
+  // (W6) do not apply to it. A reused thread ID keeps adding to the same totals.
+  if (created) g_threads[tid].seen = true;
+}
+
+// The thread ID can be reused by a new thread, possibly in another process, so it stops
+// being tracked here. What it did so far stays in the report.
+void OnThreadEnd(const EVENT_RECORD* ev, uint64_t ts) {
+  uint32_t pid, tid;
+  if (!ReadThreadEvent(ev, &pid, &tid) || pid != g_pid || !g_targetThreads.count(tid)) return;
+  ThreadState& st = g_threads[tid];
+  if (st.running && ts > st.runStart) st.runTicks += ts - st.runStart;
+  st.running = false;
+  for (auto& entry : st.awaitingStack) RecordWithoutStack(tid, st, entry.second);
+  st.awaitingStack.clear();
+  st.offCpu = false;
+  st.seen = true;
+  g_targetThreads.erase(tid);
+  g_exitedThreads.insert(tid);
 }
 
 void OnStackWalk(const EVENT_RECORD* ev) {
@@ -418,7 +452,9 @@ void WINAPI OnEvent(PEVENT_RECORD ev) {
     } else if (op == kOpReadyThread) {
       OnReadyThread(ev);
     } else if (op == kOpThreadStart || op == kOpThreadDcStart) {
-      OnThreadStart(ev);
+      OnThreadStart(ev, op == kOpThreadStart);
+    } else if (op == kOpThreadEnd) {
+      OnThreadEnd(ev, static_cast<uint64_t>(h.TimeStamp.QuadPart));
     }
   } else if (IsEqualGUID(h.ProviderId, kStackWalkGuid) && op == kOpStackWalk) {
     OnStackWalk(ev);
@@ -548,11 +584,17 @@ void SnapshotThreads(uint32_t pid) {
   CloseHandle(snap);
 }
 
+bool IsProgramThread(uint32_t tid) {
+  return g_targetThreads.count(tid) != 0 || g_exitedThreads.count(tid) != 0;
+}
+
 std::string ThreadLabel(uint32_t tid) {
   static std::unordered_map<uint32_t, std::string> cache;
   auto it = cache.find(tid);
   if (it != cache.end()) return it->second;
   std::string label = "Thread " + std::to_string(tid);
+  // Its ID may already belong to another thread, so do not look up a name for it.
+  if (g_exitedThreads.count(tid)) return cache[tid] = label + " (exited)";
   using GetDescFn = HRESULT(WINAPI*)(HANDLE, PWSTR*);
   static GetDescFn getDesc = reinterpret_cast<GetDescFn>(reinterpret_cast<void*>(
       GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetThreadDescription")));
@@ -805,7 +847,7 @@ uint32_t TopWaker(const Bucket& b) {
 
 std::string WakerLabel(uint32_t tid) {
   if (tid == kUnknownThread) return "unknown";
-  if (g_targetThreads.count(tid)) return ThreadLabel(tid);
+  if (IsProgramThread(tid)) return ThreadLabel(tid);
   if (tid == kSystemWaker) return "the system (a timer or finished I/O)";
   return "outside your program (thread " + std::to_string(tid) + ")";
 }
@@ -843,15 +885,13 @@ void PrintReport(double ticksPerSecond, int topN, const SessionProps& stopped, b
   if (!symbolsOk) std::printf("Warning: could not open the process to read function names (did it exit?).\n");
 
   // Per-thread summary.
-  std::vector<uint32_t> tids;
+  std::vector<uint32_t> tids;  // includes threads that exited during the trace
+  for (const auto& [tid, st] : g_threads)
+    if (st.seen) tids.push_back(tid);
   int unseen = 0;
   for (uint32_t tid : g_targetThreads) {
     auto it = g_threads.find(tid);
-    if (it == g_threads.end() || !it->second.seen) {
-      ++unseen;
-      continue;
-    }
-    tids.push_back(tid);
+    if (it == g_threads.end() || !it->second.seen) ++unseen;
   }
   std::sort(tids.begin(), tids.end(), [](uint32_t a, uint32_t b) {
     return g_threads[a].waitTicks > g_threads[b].waitTicks;
@@ -908,7 +948,7 @@ void PrintReport(double ticksPerSecond, int topN, const SessionProps& stopped, b
       std::printf("  * %s spent %.0f%% of the time %s, in %s.\n", ThreadLabel(tid).c_str(),
                   pct(b->ticks), CategorySentence(c), YourCodeFrame(*b, sym).c_str());
       uint32_t waker = TopWaker(*b);
-      if (c == Category::Lock && g_targetThreads.count(waker) && waker != tid) {
+      if (c == Category::Lock && IsProgramThread(waker) && waker != tid) {
         // What was the thread that released the lock busy with?
         for (const Bucket* wb : buckets) {
           if (wb->tid != waker) continue;

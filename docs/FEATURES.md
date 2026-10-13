@@ -100,3 +100,4 @@ Newest line last. Format: `YYYY-MM-DD  ID  status  note`.
 - 2026-10-12  W5  started  Implemented in waitwhy.cpp; waits for a demo run to confirm.
 - 2026-10-12  W6  started  Implemented in waitwhy.cpp; also counts running time for a thread already on a CPU at window start. Waits for a demo run to confirm.
 - 2026-10-12  W7  started  Implemented in waitwhy.cpp: stack snapshot after the trace stops for threads still off the CPU or blocked the whole window; waits for a demo run to confirm.
+- 2026-10-13  W8  started  Implemented in waitwhy.cpp; also stops W6 from opening a window-start period for a thread created during the trace. Waits for a demo run to confirm.
