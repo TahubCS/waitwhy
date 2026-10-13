@@ -571,6 +571,69 @@ std::string ThreadLabel(uint32_t tid) {
   return label;
 }
 
+// Reads the user-mode call stack of a thread that is blocked right now, innermost first, by
+// suspending it for the moment the walk takes. `proc` must have DbgHelp initialised.
+// Returns false when the thread cannot be opened (it has exited).
+bool SnapshotStack(HANDLE proc, uint32_t tid, std::vector<uint64_t>* frames) {
+  HANDLE th = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE, tid);
+  if (!th) return false;
+  if (SuspendThread(th) != static_cast<DWORD>(-1)) {
+    CONTEXT ctx{};
+    ctx.ContextFlags = CONTEXT_FULL;
+    if (GetThreadContext(th, &ctx)) {  // user-mode registers, even while blocked in the kernel
+      STACKFRAME64 f{};
+      f.AddrPC.Offset = ctx.Rip;
+      f.AddrPC.Mode = AddrModeFlat;
+      f.AddrStack.Offset = ctx.Rsp;
+      f.AddrStack.Mode = AddrModeFlat;
+      f.AddrFrame.Offset = ctx.Rbp;
+      f.AddrFrame.Mode = AddrModeFlat;
+      for (int i = 0; i < 128; ++i) {
+        if (!StackWalk64(IMAGE_FILE_MACHINE_AMD64, proc, th, &f, &ctx, nullptr,
+                         SymFunctionTableAccess64, SymGetModuleBase64, nullptr) ||
+            f.AddrPC.Offset == 0)
+          break;
+        frames->push_back(f.AddrPC.Offset);
+      }
+    }
+    ResumeThread(th);
+  }
+  CloseHandle(th);
+  return true;
+}
+
+// A thread that is off the CPU when the trace ends never gets the stack that is logged at
+// its next switch-in, and a thread blocked for the whole window has no events at all. Both
+// get one stack snapshot instead. A whole-window thread becomes one wait from the window
+// start; FlushAtEnd records both as still waiting at the end.
+void SnapshotThreadsStillBlocked() {
+  HANDLE proc = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, g_pid);
+  if (!proc) return;
+  SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_FAIL_CRITICAL_ERRORS);
+  if (!SymInitializeW(proc, nullptr, TRUE)) {
+    CloseHandle(proc);
+    return;
+  }
+  for (uint32_t tid : g_targetThreads) {
+    ThreadState& st = g_threads[tid];
+    const bool blockedWholeWindow = !st.seen && !st.offCpu;
+    if (!blockedWholeWindow && !(st.offCpu && st.open.isWait)) continue;
+    std::vector<uint64_t> frames;
+    if (!SnapshotStack(proc, tid, &frames)) continue;  // gone; leave it as never seen
+    if (blockedWholeWindow) {
+      st.open = OffCpu{};
+      st.open.start = g_firstTs;
+      st.open.reason = kReasonUnknown;
+      st.open.isWait = true;
+      st.offCpu = true;
+      st.seen = true;
+    }
+    st.open.stack = std::move(frames);
+  }
+  SymCleanup(proc);
+  CloseHandle(proc);
+}
+
 class Symbolizer {
  public:
   bool Init(uint32_t pid) {
@@ -1006,6 +1069,7 @@ int wmain(int argc, wchar_t** argv) {
                 Narrow(dumpPath).c_str());
   }
 
+  if (g_firstTs != 0) SnapshotThreadsStillBlocked();
   FlushAtEnd();
   PrintReport(static_cast<double>(freq.QuadPart), topN, stopped, stacksOn);
   return 0;
