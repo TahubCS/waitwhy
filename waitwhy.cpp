@@ -190,7 +190,7 @@ std::vector<uint32_t> g_cpuThread(256, kUnknownThread);  // thread currently on 
 uint64_t g_firstTs = 0;
 uint64_t g_lastTs = 0;
 uint64_t g_contextSwitches = 0;
-uint64_t g_stacksAttached = 0;
+uint64_t g_waitsWithStack = 0;
 uint64_t g_waitsWithoutStack = 0;
 uint64_t g_kernelOnlyFragments = 0;  // stack events for a wait that held no user-mode frame
 bool g_stacksOn = false;  // set before the trace is read; no stacks means no point waiting
@@ -304,8 +304,9 @@ void OnCSwitch(const EVENT_RECORD* ev, uint64_t ts) {
       if (!st.open.isWait || !g_stacksOn) {
         Record(c.newThreadId, st, st.open, false);  // no stack needed, or none will come
       } else {
-        // The stack for this wait is the one recorded for this switch-in, so it is matched
-        // by this timestamp. It is logged after this event, possibly much later.
+        // Its user-mode stack is logged after this event, possibly much later: either for
+        // this switch-in, or for an earlier one when the thread has not been back in user
+        // mode since (W14). OnStackWalk finds it by timestamp either way.
         st.awaitingStack.emplace(ts, std::move(st.open));
         if (st.awaitingStack.size() > kMaxWaitsAwaitingStack) {
           auto oldest = st.awaitingStack.begin();
@@ -423,29 +424,36 @@ void OnStackWalk(const EVENT_RECORD* ev) {
   }
 
   ThreadState& st = g_threads[stackTid];
-  // Only the wait that ended at the switch this stack was recorded for gets it. Stacks for
-  // other switches (after a preemption, or for a wait already recorded) are ignored.
-  auto it = st.awaitingStack.find(eventTs);
-  if (it == st.awaitingStack.end()) return;
-
-  // One stack can arrive as two events with the same EventTimeStamp: the kernel part,
-  // logged at the switch, and the user part, logged once the thread is back in user mode.
-  // Only user-mode frames are kept, so a fragment without any is skipped and the wait keeps
-  // waiting for the rest of its stack.
-  OffCpu& w = it->second;
-  const size_t framesBefore = w.stack.size();
+  std::vector<uint64_t> userStack;
   for (size_t i = 0; i < frames; ++i) {
     uint64_t addr = 0;
     std::memcpy(&addr, p + 16 + i * ptrSize, ptrSize);
-    if (addr != 0 && addr < kUserSpaceLimit) w.stack.push_back(addr);
+    if (addr != 0 && addr < kUserSpaceLimit) userStack.push_back(addr);
   }
-  if (w.stack.size() == framesBefore) {
-    ++g_kernelOnlyFragments;
+
+  // One stack can arrive as two events with the same EventTimeStamp: the kernel part,
+  // logged at the switch, and the user part, logged once the thread is back in user mode.
+  // Only user-mode frames are kept, so the kernel part is skipped and the wait keeps
+  // waiting for its user part (W1).
+  if (userStack.empty()) {
+    if (st.awaitingStack.count(eventTs)) ++g_kernelOnlyFragments;
     return;
   }
-  ++g_stacksAttached;
-  Record(stackTid, st, w, false);
-  st.awaitingStack.erase(it);
+
+  // The user part is stamped with the switch-in it was captured for, and the thread can block
+  // several more times before it gets back to user mode and the part is logged. Every wait
+  // that ended in between happened inside the same call into the kernel, so they all share
+  // this stack (W14). The stamped switch-in itself may have ended a preemption, not a wait.
+  // Waits that ended before it belong to an earlier user-mode stack and are left alone.
+  const auto delivered = static_cast<uint64_t>(ev->EventHeader.TimeStamp.QuadPart);
+  auto it = st.awaitingStack.lower_bound(eventTs);
+  const auto last = st.awaitingStack.upper_bound((std::max)(delivered, eventTs));
+  while (it != last) {
+    it->second.stack = userStack;
+    ++g_waitsWithStack;
+    Record(stackTid, st, it->second, false);
+    it = st.awaitingStack.erase(it);
+  }
 }
 
 void WINAPI OnEvent(PEVENT_RECORD ev) {
@@ -1020,10 +1028,10 @@ void PrintReport(double ticksPerSecond, int topN, const SessionProps& stopped, b
   if (!anyFinding)
     std::printf("  No thread lost a significant share of its time to blocking (sleeps excluded).\n");
 
-  std::printf("\n(%llu context switches seen, %llu call stacks matched,"
+  std::printf("\n(%llu context switches seen, %llu waits with a call stack,"
               " %llu waits without a call stack, %llu kernel-only stack parts)\n",
               static_cast<unsigned long long>(g_contextSwitches),
-              static_cast<unsigned long long>(g_stacksAttached),
+              static_cast<unsigned long long>(g_waitsWithStack),
               static_cast<unsigned long long>(g_waitsWithoutStack),
               static_cast<unsigned long long>(g_kernelOnlyFragments));
 }
