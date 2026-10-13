@@ -45,6 +45,7 @@ was stuck in (DbgHelp + .pdb); and which thread woke it up.
 | `README.md` | User-facing description, demo instructions, known limitations. |
 | `DESIGN.md` | Proposed architecture (staged pipeline, testable analysis core). A proposal, not approved; `FEATURES.md` wins on any conflict. |
 | `FEATURES.md` | Append-only record of core features, decisions and work items. Read it before planning any change. |
+| `ROADMAP.md` | Proposed phased plan towards a tool others can rely on (`R` items, open decisions `X`). A proposal, not approved; `FEATURES.md` wins on any conflict. |
 
 ## Build
 
