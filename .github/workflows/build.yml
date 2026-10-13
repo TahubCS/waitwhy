@@ -24,3 +24,49 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "slowapp.cpp did not compile" }
           cl /nologo /EHsc /O2 /Zi /std:c++17 waitwhy.cpp /Fe:waitwhy.exe
           if ($LASTEXITCODE -ne 0) { throw "waitwhy.cpp did not compile" }
+
+      # C8 smoke test: waitwhy must report the lock bug in buggy slowapp and nothing in fixed
+      # slowapp. GitHub's Windows runners run as Administrator, which kernel tracing needs.
+      - name: Smoke test (buggy and fixed slowapp)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          function Watch-Slowapp([string]$Label, [string[]]$SlowappArgs) {
+            $app = Start-Process -FilePath (Resolve-Path .\slowapp.exe) -PassThru -WindowStyle Hidden `
+              -ArgumentList (@('--seconds', '20', '--mb', '64') + $SlowappArgs)
+            Start-Sleep -Seconds 3
+            $text = & .\waitwhy.exe --pid $app.Id --seconds 8 2>&1 | Out-String
+            $code = $LASTEXITCODE
+            if (-not $app.HasExited) { Stop-Process -Id $app.Id -ErrorAction SilentlyContinue }
+            Write-Host "===== waitwhy on $Label slowapp (exit code $code) ====="
+            Write-Host $text
+            if ($code -eq 2) {
+              Write-Host "::warning::Kernel tracing is not available on this runner (waitwhy exit code 2); the smoke test was skipped."
+              exit 0
+            }
+            if ($code -ne 0) { throw "waitwhy failed on $Label slowapp with exit code $code" }
+            return $text
+          }
+
+          $buggy = Watch-Slowapp 'buggy' @()
+          $fixed = Watch-Slowapp 'fixed' @('--fixed')
+
+          # Function names can carry a namespace, e.g. slowapp!`anonymous namespace'::update_frame.
+          # In the fixed run saver still waits on the disk, which is fine; only the lock must go.
+          $failures = @()
+          if ($buggy -notmatch '\(main\) spent \d+% of the time waiting for a lock that another thread was holding, in slowapp!.*update_frame\.') {
+            $failures += 'Buggy run: main is not reported as blocked on a lock in update_frame.'
+          }
+          if ($buggy -notmatch 'The lock was released by Thread \d+ \(saver\)') {
+            $failures += 'Buggy run: saver is not named as the thread that released the lock.'
+          }
+          if ($buggy -notmatch '\(saver\).* waiting for the disk, in slowapp!.*write_settings_to_disk\.') {
+            $failures += 'Buggy run: saver is not reported as waiting for the disk in write_settings_to_disk.'
+          }
+          if ($fixed -match 'waiting for a lock that another thread was holding') {
+            $failures += 'Fixed run: a thread is still reported as blocked on a lock.'
+          }
+          foreach ($f in $failures) { Write-Host "::error::$f" }
+          if ($failures.Count -gt 0) { exit 1 }
+          Write-Host 'C8 holds: the bug is reported in the buggy run and not in the fixed run.'
