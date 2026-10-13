@@ -97,3 +97,4 @@ Newest line last. Format: `YYYY-MM-DD  ID  status  note`.
 - 2026-10-12  W1  started  Implemented in waitwhy.cpp on top of W2: a wait is recorded once its user-mode stack part arrives; waits for a demo run to confirm.
 - 2026-10-12  W3  started  Implemented in waitwhy.cpp; waits for a demo run to confirm.
 - 2026-10-12  W4  started  Implemented in waitwhy.cpp; waits for a demo run to confirm.
+- 2026-10-12  W5  started  Implemented in waitwhy.cpp; waits for a demo run to confirm.
