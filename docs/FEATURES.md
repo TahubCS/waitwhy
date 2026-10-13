@@ -89,6 +89,15 @@ approval before work begins; see the status log.
   `std::condition_variable`, `_Cnd_wait`) before generic wait-function names, which ntdll
   may only resolve to its nearest exported name. When explaining who held a lock, skip the
   releasing thread's waits that have no call stack. Serves C4, C7, C8.
+- **W14. One user-mode stack for several waits in one system call.** Extends W2. When a
+  thread blocks several times inside one call into the kernel, Windows logs one user-mode
+  stack fragment, stamped with an earlier switch-in of that thread (`EventTimeStamp`) and
+  delivered when the thread returns to user mode. That fragment is attached to every wait of
+  the thread that still awaits a stack and whose switch-in lies between `EventTimeStamp` and
+  the fragment's delivery, whether or not the switch-in at `EventTimeStamp` ended a wait (it
+  can be a resumption after preemption). Each wait keeps its own duration, wait reason, ready
+  time and waker; waits before `EventTimeStamp` are never touched. Evidence:
+  `docs/TRACE-FINDINGS.md` and `docs/traces/buggy-64mb-events.txt`. Serves C5.
 
 ## Status log
 
@@ -112,3 +121,6 @@ Newest line last. Format: `YYYY-MM-DD  ID  status  note`.
 - 2026-10-13  W11  started  Smoke test added to .github/workflows/build.yml; skips with a warning when the runner cannot trace (exit code 2, W10).
 - 2026-10-13  W13  proposed  From the first W11 CI run: main's lock wait in update_frame was labelled "another thread or an event".
 - 2026-10-13  W13  started  The user asked for the failing W11 branch to be fixed. Implemented in waitwhy.cpp.
+- 2026-10-13  W14  proposed  From docs/TRACE-FINDINGS.md: one delayed user-stack fragment covers up to six of saver's waits; 702 of them had no stack.
+- 2026-10-13  W14  approved  By the user, including that it extends W2's exact-timestamp rule.
+- 2026-10-13  W14  started  Implemented in waitwhy.cpp. A model of the rule over the recorded trace predicts 1552 waits with a stack and 4 without (was 845 and 711); the replay test checks it.
