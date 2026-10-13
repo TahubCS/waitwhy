@@ -45,6 +45,9 @@ was stuck in (DbgHelp + .pdb); and which thread woke it up.
 | `README.md` | User-facing description, demo instructions, known limitations. |
 | `DESIGN.md` | Proposed architecture (staged pipeline, testable analysis core). A proposal, not approved; `FEATURES.md` wins on any conflict. |
 | `FEATURES.md` | Append-only record of core features, decisions and work items. Read it before planning any change. |
+| `TRACE-FINDINGS.md` | Analysis of a real captured trace (`docs/traces/`): how stacks arrive, the evidence behind W14. |
+| `docs/traces/` | Captured `--dump-events` files and their reports, kept byte for byte as test fixtures. |
+| `tests/replay_events.cpp` | Replays a dump through waitwhy's event handlers (includes `waitwhy.cpp` with `WAITWHY_NO_MAIN`) and checks stack matching. No admin needed; runs in CI. |
 | `ROADMAP.md` | Proposed phased plan towards a tool others can rely on (`R` items, open decisions `X`). A proposal, not approved; `FEATURES.md` wins on any conflict. |
 
 ## Build

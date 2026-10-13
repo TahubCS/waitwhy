@@ -106,8 +106,8 @@ Ready → Running splits one off-CPU period into wait time and ready time (W5).
 
 ### 4.3 Stack matcher
 
-**Not designed yet.** The matching rule is decided from a raw event dump (4.7), not on
-paper.
+**Decided (W14).** The matching rule was decided from a raw event dump (4.7), not on paper;
+the answers are at the end of this section.
 
 The earlier draft of this section keyed each wait by (thread, switch-in timestamp) and gave
 up on it when the thread switched in again. That rule rests on an unverified assumption:
@@ -141,6 +141,26 @@ user-mode fragment for thread `X` attaches to every wait of `X` still awaiting a
 would contradict W2 as written ("only to the wait whose switch-in timestamp equals the
 stack's `EventTimeStamp`"). `FEATURES.md` cannot be reworded, so that case stops and goes to
 the user before anything is built.
+
+**Answers from the 2026-10-13 trace** (`docs/traces/buggy-64mb-events.txt`, analysed in
+`docs/TRACE-FINDINGS.md`):
+
+1. Yes. Kernel and user parts arrive as separate events: 1,946 kernel-only parts and 972
+   parts with user frames.
+2. One user part for several waits. It carries the timestamp of the first switch-in after
+   the thread last left user mode, which can be a resumption after preemption rather than
+   the end of a wait, and is delivered when the thread returns to user mode (saver: median
+   4 ms later, at most 11.7 ms). At most six waits share one part; no two parts' intervals
+   overlap.
+3. After. No user part arrives before its switch-in, and every part's timestamp is a real
+   switch-in of its thread.
+4. Rarely. Only 3 of main's 511 waits lie in no part's interval; every wait of saver and
+   ticker lies in exactly one.
+
+The rule is therefore narrower than the one sketched above: a user part attaches to the
+waits of its thread whose switch-in lies between the part's `EventTimeStamp` and its
+delivery, not to every pending wait. The user approved it as W14 in `FEATURES.md`;
+`tests/replay_events.cpp` replays the trace and checks the result.
 
 ### 4.4 Aggregation and memory
 
