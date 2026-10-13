@@ -691,7 +691,8 @@ class Symbolizer {
       exeModule_ = Lower(Narrow(dot == std::wstring::npos ? file : file.substr(0, dot)));
       exeFile_ = Narrow(file);
     }
-    SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_FAIL_CRITICAL_ERRORS);
+    SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_FAIL_CRITICAL_ERRORS |
+                  SYMOPT_LOAD_LINES);
     ok_ = SymInitializeW(proc_, nullptr, TRUE) != FALSE;
     return ok_;
   }
@@ -725,6 +726,24 @@ class Symbolizer {
     return names_[addr] = result;
   }
 
+  // Lower-case path of the source file the code at `addr` came from, with backslashes;
+  // empty when the .pdb has no line information for it.
+  const std::string& SourceFile(uint64_t addr) {
+    auto it = files_.find(addr);
+    if (it != files_.end()) return it->second;
+    std::string file;
+    if (ok_) {
+      IMAGEHLP_LINEW64 line{};
+      line.SizeOfStruct = sizeof line;
+      DWORD disp = 0;
+      if (SymGetLineFromAddrW64(proc_, addr, &disp, &line) && line.FileName) {
+        file = Lower(Narrow(line.FileName));
+        std::replace(file.begin(), file.end(), '/', '\\');
+      }
+    }
+    return files_[addr] = file;
+  }
+
   bool IsExeFrame(const std::string& name) const {
     size_t bang = name.find('!');
     return bang != std::string::npos && Lower(name.substr(0, bang)) == exeModule_;
@@ -737,6 +756,7 @@ class Symbolizer {
   std::string exeModule_;
   std::string exeFile_;
   std::unordered_map<uint64_t, std::string> names_;
+  std::unordered_map<uint64_t, std::string> files_;
 };
 
 // ---------------------------------------------------------------------------
@@ -812,18 +832,29 @@ Category Classify(const Bucket& b, Symbolizer& sym) {
   return Category::Other;
 }
 
-// First frame in the program's own code, skipping C++ library internals.
+// True for C++ runtime and standard library code that the linker copied into the exe
+// (std::mutex::lock, _Mtx_lock, mtx_do_lock, the CRT's thread and main startup code). The
+// source path decides when the .pdb has line information; otherwise the name does.
+bool IsRuntimeFrame(const std::string& function, const std::string& sourceFile) {
+  for (const char* dir : {"\\vctools\\crt\\", "\\crts\\ucrt\\", "\\vc\\tools\\msvc\\",
+                          "\\windows kits\\"})
+    if (sourceFile.find(dir) != std::string::npos) return true;
+  for (const char* prefix : {"std::", "_", "Concurrency::", "concurrency::", "mtx_do_lock",
+                             "thread_start<", "invoke_main", "mainCRTStartup", "wmainCRTStartup",
+                             "WinMainCRTStartup", "wWinMainCRTStartup"})
+    if (function.rfind(prefix, 0) == 0) return true;
+  return false;
+}
+
+// First frame in the program's own code, skipping the C++ runtime linked into it.
 std::string YourCodeFrame(const Bucket& b, Symbolizer& sym) {
-  std::string firstExe;
   for (uint64_t a : b.stack) {
     const std::string& n = sym.Name(a);
     if (!sym.IsExeFrame(n)) continue;
-    if (firstExe.empty()) firstExe = n;
-    std::string fn = n.substr(n.find('!') + 1);
-    if (fn.rfind("std::", 0) == 0 || fn.rfind("_", 0) == 0) continue;
+    if (IsRuntimeFrame(n.substr(n.find('!') + 1), sym.SourceFile(a))) continue;
     return n;
   }
-  return firstExe.empty() ? "(not in your program's code)" : firstExe;
+  return "(not in your program's code)";
 }
 
 // Innermost frame, skipping the raw system-call stubs (ntdll!Nt..., ntdll!Zw...).
