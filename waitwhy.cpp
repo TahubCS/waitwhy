@@ -94,6 +94,7 @@ constexpr UCHAR kOpStackWalk = 32;     // inside the StackWalk class
 
 constexpr int kTraceStackTracingInfo = 3;  // TRACE_INFO_CLASS value
 constexpr int8_t kThreadStateWaiting = 5;  // KTHREAD_STATE: Waiting
+constexpr int8_t kReasonUnknown = -1;      // our marker: blocked since before the trace began
 constexpr uint32_t kUnknownThread = 0xFFFFFFFFu;
 constexpr uint32_t kSystemWaker = 0;  // idle thread, or a DPC (timer, finished I/O)
 constexpr uint8_t kReadyFlagFromDpc = 0x1;  // ReadyThread Flag: readied from a DPC
@@ -225,6 +226,18 @@ void Record(uint32_t tid, ThreadState& st, const OffCpu& w, bool stillWaiting) {
   if (w.wokenBy != kUnknownThread) b.wakers[w.wokenBy] += d;
 }
 
+// A thread whose first event is being readied or switched in was already off the CPU when
+// the trace started. Opens that period from the start of the window. Its wait reason is not
+// known, so it is classified from the stack that arrives at its switch-in.
+void OpenPeriodFromWindowStart(ThreadState& st, uint64_t ts) {
+  if (st.seen || st.offCpu) return;
+  st.open = OffCpu{};
+  st.open.start = g_firstTs != 0 ? g_firstTs : ts;
+  st.open.reason = kReasonUnknown;
+  st.open.isWait = true;
+  st.offCpu = true;
+}
+
 // Records a finished wait whose call stack never arrived.
 void RecordWithoutStack(uint32_t tid, ThreadState& st, const OffCpu& w) {
   ++g_waitsWithoutStack;
@@ -252,6 +265,10 @@ void OnCSwitch(const EVENT_RECORD* ev, uint64_t ts) {
   // A thread of the target process leaves the CPU.
   if (g_targetThreads.count(c.oldThreadId)) {
     ThreadState& st = g_threads[c.oldThreadId];
+    if (!st.seen && !st.offCpu) {  // it was already running when the trace started
+      st.running = true;
+      st.runStart = g_firstTs;
+    }
     st.seen = true;
     if (st.running) {
       st.runTicks += ts - st.runStart;
@@ -268,6 +285,7 @@ void OnCSwitch(const EVENT_RECORD* ev, uint64_t ts) {
   // A thread of the target process gets back on a CPU.
   if (g_targetThreads.count(c.newThreadId)) {
     ThreadState& st = g_threads[c.newThreadId];
+    OpenPeriodFromWindowStart(st, ts);
     st.seen = true;
     if (st.offCpu) {
       st.open.end = ts;
@@ -305,6 +323,7 @@ void OnReadyThread(const EVENT_RECORD* ev) {
     ++g_dumpLines;
   }
   ThreadState& st = g_threads[readied];
+  OpenPeriodFromWindowStart(st, static_cast<uint64_t>(ev->EventHeader.TimeStamp.QuadPart));
   if (!st.offCpu) return;
   if (st.open.readyAt == 0)
     st.open.readyAt = static_cast<uint64_t>(ev->EventHeader.TimeStamp.QuadPart);
@@ -805,7 +824,10 @@ void PrintReport(double ticksPerSecond, int topN, const SessionProps& stopped, b
     std::printf("      Your code  : %s\n", YourCodeFrame(b, sym).c_str());
     std::printf("      Blocked in : %s\n", BlockedInFrame(b, sym).c_str());
     std::printf("      Woken by   : %s\n", WakerLabel(TopWaker(b)).c_str());
-    std::printf("      Wait reason: %s (kernel code %d)\n", WaitReasonName(b.reason), b.reason);
+    if (b.reason == kReasonUnknown)
+      std::printf("      Wait reason: not known (already blocked when the trace started)\n");
+    else
+      std::printf("      Wait reason: %s (kernel code %d)\n", WaitReasonName(b.reason), b.reason);
   }
 
   // Plain-English findings.
