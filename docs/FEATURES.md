@@ -228,3 +228,4 @@ Newest line last. Format: `YYYY-MM-DD  ID  status  note`.
 - 2026-10-16  W19  confirmed  CI run #65: golden report matches; each smoke run's report rebuilt from its dump equals the live report.
 - 2026-10-16  W20  started  Window from QPC before the trace reader starts to QPC before the session stops; earlier events clamped to the window; thread shares are of each thread's lifetime in the window.
 - 2026-10-16  W20  started  Follow-up from CI run #66 (8.42 s window, shares up to 101%): watch until a QPC deadline instead of counting 100 ms sleeps; context-switch, ready and thread events stamped after the window are not counted.
+- 2026-10-16  W21  started  Idle threads (ran at most 1% of their lifetime, no wait in the program's code, every wait a wait for work) are counted on one line and left out of the tables and findings.

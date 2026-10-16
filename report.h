@@ -77,6 +77,7 @@ struct Report {
   std::vector<std::string> warnings;
   std::vector<ThreadRow> threads;
   int unseenThreads = 0;  // never ran during the window
+  std::vector<uint32_t> idleThreads;  // only waited for work outside the program (W21)
   bool anyWaits = false;
   std::vector<WaitRow> waits;  // the biggest, at most topN
   std::vector<Finding> findings;
@@ -136,6 +137,28 @@ inline Report BuildReport(const Analyzer& an, SymbolSource& sym, const ReportOpt
     const uint64_t wx = an.threads.at(x).waitTicks, wy = an.threads.at(y).waitTicks;
     return wx != wy ? wx > wy : x < y;
   });
+
+  // Idle threads (W21): they hardly ran, and every wait was a wait for work outside the
+  // program's code. They are counted, not reported; their waits say nothing about the program.
+  std::unordered_map<uint32_t, std::vector<const Bucket*>> byThread;
+  for (const auto& [key, b] : an.buckets) byThread[b.tid].push_back(&b);
+  auto isIdle = [&](uint32_t tid) {
+    const uint64_t life = an.Lifetime(tid);
+    if (life == 0 || an.threads.at(tid).runTicks * 100 > life) return false;  // ran > 1%
+    auto it = byThread.find(tid);
+    if (it == byThread.end()) return false;
+    for (const Bucket* b : it->second)
+      if (YourCodeFrame(*b, sym) != kNotYourCode || !IsWaitForWork(*b, sym)) return false;
+    return true;
+  };
+  std::vector<uint32_t> shown;
+  for (uint32_t tid : tids) (isIdle(tid) ? r.idleThreads : shown).push_back(tid);
+  tids = shown;
+  std::sort(r.idleThreads.begin(), r.idleThreads.end());
+  auto idle = [&r](uint32_t tid) {
+    return std::find(r.idleThreads.begin(), r.idleThreads.end(), tid) != r.idleThreads.end();
+  };
+
   for (uint32_t tid : tids) {
     const ThreadState& st = an.threads.at(tid);
     ThreadRow row;
@@ -149,7 +172,8 @@ inline Report BuildReport(const Analyzer& an, SymbolSource& sym, const ReportOpt
 
   // Biggest waits. Buckets are in key order, and the sort keeps ties in that order.
   std::vector<const Bucket*> buckets;
-  for (const auto& [key, b] : an.buckets) buckets.push_back(&b);
+  for (const auto& [key, b] : an.buckets)
+    if (!idle(b.tid)) buckets.push_back(&b);
   std::stable_sort(buckets.begin(), buckets.end(),
                    [](const Bucket* x, const Bucket* y) { return x->ticks > y->ticks; });
   r.anyWaits = !buckets.empty();
@@ -254,6 +278,9 @@ inline std::string RenderText(const Report& r) {
   for (const ThreadRow& t : r.threads)
     Appendf(out, "  %-30.30s %9.0f%% %9.0f%% %11.0f%%\n", t.label.c_str(), t.runningPct,
             t.waitingPct, t.readyPct);
+  if (!r.idleThreads.empty())
+    Appendf(out, "  (%zu idle thread-pool thread(s) not shown: they only waited for work, outside your code)\n",
+            r.idleThreads.size());
   if (r.unseenThreads)
     Appendf(out, "  (%d more thread(s) never ran during the window: blocked the whole time or idle)\n",
             r.unseenThreads);

@@ -149,6 +149,11 @@ void CheckFrameChoice() {
   ExpectStr("blocked in", BlockedInFrame(idle, sym), "ntdll!TpCallbackMayRunLong");
   ExpectStr("no stack", BlockedInFrame(MakeBucket({}, 0), sym), "(no call stack recorded)");
   ExpectCategory("idle worker is something else", Classify(idle, sym), Category::Other);
+  ExpectEq("idle worker waits for work (W21)", IsWaitForWork(idle, sym), 1);
+  ExpectEq("WrQueue reason waits for work", IsWaitForWork(MakeBucket({}, 15), sym), 1);
+  const Bucket sleeping = MakeBucket(
+      sym.Stack({"ntdll!NtDelayExecution", "KERNELBASE!SleepEx", "kernel32!BaseThreadInitThunk"}), 4);
+  ExpectEq("a sleep is not a wait for work", IsWaitForWork(sleeping, sym), 0);
 }
 
 void CheckRuntimeFrames() {

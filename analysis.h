@@ -514,6 +514,8 @@ inline bool IsRuntimeFrame(const std::string& function, const std::string& sourc
   return false;
 }
 
+constexpr const char kNotYourCode[] = "(not in your program's code)";
+
 // First frame in the program's own code, skipping the C++ runtime linked into it.
 inline std::string YourCodeFrame(const Bucket& b, SymbolSource& sym) {
   for (uint64_t a : b.stack) {
@@ -522,7 +524,17 @@ inline std::string YourCodeFrame(const Bucket& b, SymbolSource& sym) {
     if (IsRuntimeFrame(n.substr(n.find('!') + 1), sym.SourceFile(a))) continue;
     return n;
   }
-  return "(not in your program's code)";
+  return kNotYourCode;
+}
+
+// A wait for work to arrive, as idle thread-pool workers do (W21): in the thread pool's
+// worker-factory wait, or in a kernel queue (WrQueue, also I/O completion ports).
+inline bool IsWaitForWork(const Bucket& b, SymbolSource& sym) {
+  if (b.reason == 15) return true;  // WrQueue
+  for (uint64_t a : b.stack)
+    if (HasAny(Lower(sym.Name(a)), {"workerfactory", "tppworkerthread", "tppwaiterpthread"}))
+      return true;
+  return false;
 }
 
 // Innermost frame, skipping the raw system-call stubs (ntdll!Nt..., ntdll!Zw...).
