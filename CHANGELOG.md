@@ -50,3 +50,17 @@ for?" for any Windows x64 program.
   Windows, GCC and Clang (W15, W16, W19); every build is warning-free at `/W4 /WX` (W17).
 - CI traces slowapp and eleven known-answer scenarios on every push (W29).
 - User documentation: how to read a report, troubleshooting, FAQ and scenarios (W40).
+
+### Hardening
+- `--no-suspend`: no stack snapshots, so waitwhy never pauses the watched program's threads
+  (W45); `--redact`: reports, dumps and exports without folder paths or the user's and
+  machine's names (W47).
+- Bounded memory on long captures: one thread's waits in more than 4096 different call stacks
+  are grouped by wait reason, and the data quality says how much (W44).
+- Trace buffers grow with the number of CPUs; `scenarios --mode bench [--work-us N]` measures
+  the overhead, which CI publishes (W43).
+- `waitwhy.exe` is built with control-flow guard, CET compatibility and high-entropy ASLR; the
+  dump and JSON readers are fuzzed with sanitizers in CI, and a damaged dump or a too deeply
+  nested JSON report is handled instead of ending waitwhy (W46).
+- Releases with SHA-256 sums and build provenance (W42); `SECURITY.md`, a threat model,
+  `CONTRIBUTING.md` and issue forms (W46, W48).
