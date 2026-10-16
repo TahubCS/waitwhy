@@ -144,6 +144,14 @@ struct SessionProps {
 Analyzer g_analysis;
 std::vector<uint32_t> g_cpuThread(256, kUnknownThread);  // thread currently on each CPU
 std::atomic<bool> g_stopRequested{false};
+// End of the observation window, set by the main thread when it stops watching; 0 until then
+// (W20). Events stamped later are still delivered until the session stops; they are not counted.
+std::atomic<uint64_t> g_windowEnd{0};
+
+bool PastWindow(uint64_t ts) {
+  const uint64_t end = g_windowEnd.load(std::memory_order_relaxed);
+  return end != 0 && ts > end;
+}
 FILE* g_dump = nullptr;   // --dump-events output; null when not asked for
 uint64_t g_dumpLines = 0;
 
@@ -154,6 +162,9 @@ void OnCSwitch(const EVENT_RECORD* ev, uint64_t ts) {
 
   const unsigned cpu = ev->BufferContext.ProcessorNumber;
   if (cpu < g_cpuThread.size()) g_cpuThread[cpu] = c.newThreadId;
+  // After the window a thread keeps the state it had at its end: a wait still open then is
+  // reported as still waiting. Stacks are still taken, because they arrive late (W14).
+  if (PastWindow(ts)) return;
 
   if (g_dump && (g_analysis.IsTarget(c.oldThreadId) || g_analysis.IsTarget(c.newThreadId))) {
     std::fprintf(g_dump, "CSWITCH ts=%llu cpu=%u old=%u new=%u oldState=%d oldReason=%d\n",
@@ -179,6 +190,7 @@ void OnReadyThread(const EVENT_RECORD* ev) {
   // Payload: uint32 TThreadId, int8 AdjustReason, int8 AdjustIncrement, int8 Flag, int8 spare.
   const uint8_t flag = ev->UserDataLength >= 7 ? static_cast<const uint8_t*>(ev->UserData)[6] : 0;
   const auto ts = static_cast<uint64_t>(ev->EventHeader.TimeStamp.QuadPart);
+  if (PastWindow(ts)) return;
   const unsigned cpu = ev->BufferContext.ProcessorNumber;
   ReadyEvent e;
   e.ts = ts;
@@ -199,6 +211,7 @@ void OnThreadEvent(const EVENT_RECORD* ev, ThreadEvent::Kind kind) {
   if (ev->UserDataLength < 2 * sizeof(uint32_t)) return;
   ThreadEvent e;
   e.ts = static_cast<uint64_t>(ev->EventHeader.TimeStamp.QuadPart);
+  if (PastWindow(e.ts)) return;
   e.kind = kind;
   std::memcpy(&e.pid, ev->UserData, sizeof e.pid);
   std::memcpy(&e.tid, static_cast<const uint8_t*>(ev->UserData) + 4, sizeof e.tid);
@@ -749,20 +762,34 @@ int wmain(int argc, wchar_t** argv) {
   std::printf("Watching PID %u (%zu threads) for %d seconds", pid, g_analysis.targetThreads.size(),
               seconds);
   std::fflush(stdout);
-  for (int tenth = 0; tenth < seconds * 10 && !g_stopRequested; ++tenth) {
-    if (WaitForSingleObject(target, 100) == WAIT_OBJECT_0) {
-      std::printf("\nThe program exited while being watched.");
-      break;
-    }
-    if (tenth % 10 == 9) {
+  // Wait for a deadline on the same clock as the events, not for a number of sleeps: each sleep
+  // rounds up to the system timer, which made an 8 s run last 8.4 s.
+  const uint64_t deadline = g_analysis.firstTs + static_cast<uint64_t>(seconds) *
+                                                     static_cast<uint64_t>(freq.QuadPart);
+  uint64_t nextDot = g_analysis.firstTs + static_cast<uint64_t>(freq.QuadPart);
+  for (;;) {
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    const auto t = static_cast<uint64_t>(now.QuadPart);
+    if (t >= deadline || g_stopRequested) break;
+    if (t >= nextDot) {
       std::printf(".");
       std::fflush(stdout);
+      nextDot += static_cast<uint64_t>(freq.QuadPart);
+    }
+    const uint64_t untilMs = (std::min)(deadline, nextDot) - t;
+    const auto waitMs = static_cast<DWORD>((std::min)(
+        uint64_t{100}, untilMs * 1000 / static_cast<uint64_t>(freq.QuadPart)));
+    if (WaitForSingleObject(target, waitMs) == WAIT_OBJECT_0) {
+      std::printf("\nThe program exited while being watched.");
+      break;
     }
   }
   std::printf("\n");
 
   LARGE_INTEGER windowEnd;
   QueryPerformanceCounter(&windowEnd);
+  g_windowEnd.store(static_cast<uint64_t>(windowEnd.QuadPart), std::memory_order_relaxed);
   SessionProps stopped;
   StopKernelSession(&stopped);  // ProcessTrace returns once the buffers are drained
   reader.join();
