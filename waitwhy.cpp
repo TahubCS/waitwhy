@@ -53,6 +53,8 @@
 #include <utility>
 #include <vector>
 
+#include "analysis.h"
+
 #ifdef _MSC_VER
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "dbghelp.lib")
@@ -71,6 +73,8 @@ static_assert(sizeof(void*) == 8, "Build waitwhy as a 64-bit (x64) program.");
 #endif
 
 namespace {
+
+using namespace waitwhy;
 
 // ---------------------------------------------------------------------------
 // Constants from the Windows kernel trace format
@@ -94,18 +98,11 @@ constexpr UCHAR kOpReadyThread = 50;
 constexpr UCHAR kOpStackWalk = 32;     // inside the StackWalk class
 
 constexpr int kTraceStackTracingInfo = 3;  // TRACE_INFO_CLASS value
-constexpr int8_t kThreadStateTerminated = 4;  // KTHREAD_STATE: Terminated
-constexpr int8_t kThreadStateWaiting = 5;  // KTHREAD_STATE: Waiting
-constexpr int8_t kReasonUnknown = -1;      // our marker: blocked since before the trace began
-constexpr uint32_t kUnknownThread = 0xFFFFFFFFu;
 
 // Exit codes, so that scripts and CI can tell the failures apart.
 constexpr int kExitOk = 0;
 constexpr int kExitUsage = 1;             // bad arguments, or the program cannot be found
 constexpr int kExitTraceUnavailable = 2;  // the kernel trace session could not be started
-constexpr uint32_t kSystemWaker = 0;  // idle thread, or a DPC (timer, finished I/O)
-constexpr uint8_t kReadyFlagFromDpc = 0x1;  // ReadyThread Flag: readied from a DPC
-constexpr uint64_t kUserSpaceLimit = 0x0000800000000000ull;  // addresses above are kernel code
 
 #pragma pack(push, 1)
 struct CSwitchPayload {
@@ -137,323 +134,107 @@ struct SessionProps {
 };
 
 // ---------------------------------------------------------------------------
-// Data collected while tracing (only touched by the trace thread until it ends)
+// Decoding: kernel events -> typed events for the analysis core (analysis.h)
 // ---------------------------------------------------------------------------
 
-// One period where a thread was switched off the CPU.
-struct OffCpu {
-  uint64_t start = 0;
-  uint64_t end = 0;
-  uint64_t readyAt = 0;    // when another thread or the system readied it; 0 = not yet
-  int8_t reason = 0;       // kernel wait reason code
-  bool isWait = false;     // true = blocked; false = preempted (it wanted the CPU)
-  uint32_t wokenBy = kUnknownThread;
-  std::vector<uint64_t> stack;  // user-mode return addresses, innermost first
-};
-
-// Upper limit on finished waits per thread that are still waiting for their call stack.
-// Beyond it the oldest one is recorded without a stack, so memory stays bounded.
-constexpr size_t kMaxWaitsAwaitingStack = 64;
-
-struct ThreadState {
-  bool offCpu = false;  // `open` holds the period the thread is off the CPU right now
-  OffCpu open;
-  // Finished waits whose call stack has not arrived yet, keyed by the timestamp of the
-  // context switch that put the thread back on a CPU. The kernel records the stack for that
-  // switch, and the StackWalk event carries the same value as its EventTimeStamp.
-  std::map<uint64_t, OffCpu> awaitingStack;
-  bool running = false;
-  uint64_t runStart = 0;
-  uint64_t runTicks = 0;
-  uint64_t waitTicks = 0;
-  uint64_t readyTicks = 0;
-  bool seen = false;
-};
-
-// All waits of one thread that share the same call stack and wait reason.
-struct Bucket {
-  uint32_t tid = 0;
-  int8_t reason = 0;
-  uint64_t ticks = 0;
-  uint32_t count = 0;
-  bool stillWaitingAtEnd = false;
-  std::vector<uint64_t> stack;
-  std::map<uint32_t, uint64_t> wakers;  // waking thread id -> wait time it ended
-};
-
-uint32_t g_pid = 0;
-std::unordered_set<uint32_t> g_targetThreads;
-std::unordered_set<uint32_t> g_exitedThreads;  // the program's threads that ended while traced
-std::unordered_map<uint32_t, ThreadState> g_threads;
-std::map<std::pair<uint32_t, uint64_t>, Bucket> g_buckets;
+Analyzer g_analysis;
 std::vector<uint32_t> g_cpuThread(256, kUnknownThread);  // thread currently on each CPU
-uint64_t g_firstTs = 0;
-uint64_t g_lastTs = 0;
-uint64_t g_contextSwitches = 0;
-uint64_t g_waitsWithStack = 0;
-uint64_t g_waitsWithoutStack = 0;
-uint64_t g_kernelOnlyFragments = 0;  // stack events for a wait that held no user-mode frame
-bool g_stacksOn = false;  // set before the trace is read; no stacks means no point waiting
 std::atomic<bool> g_stopRequested{false};
 FILE* g_dump = nullptr;   // --dump-events output; null when not asked for
 uint64_t g_dumpLines = 0;
-
-uint64_t HashWait(int8_t reason, const std::vector<uint64_t>& stack) {
-  uint64_t h = 1469598103934665603ull;  // FNV-1a
-  auto mix = [&h](uint64_t v) {
-    for (int i = 0; i < 8; ++i) {
-      h ^= (v >> (i * 8)) & 0xff;
-      h *= 1099511628211ull;
-    }
-  };
-  mix(static_cast<uint8_t>(reason));
-  for (uint64_t a : stack) mix(a);
-  return h;
-}
-
-void Record(uint32_t tid, ThreadState& st, const OffCpu& w, bool stillWaiting) {
-  if (!w.isWait) {
-    st.readyTicks += w.end > w.start ? w.end - w.start : 0;  // preempted: wanted the CPU
-    return;
-  }
-  // A wait ends when the thread is readied; from then until it is back on a CPU it only
-  // wanted a CPU, so that part counts as ready time, not as waiting.
-  const uint64_t waitEnd = (w.readyAt > w.start && w.readyAt < w.end) ? w.readyAt : w.end;
-  const uint64_t d = waitEnd > w.start ? waitEnd - w.start : 0;
-  st.readyTicks += w.end > waitEnd ? w.end - waitEnd : 0;
-  st.waitTicks += d;
-  Bucket& b = g_buckets[{tid, HashWait(w.reason, w.stack)}];
-  if (b.count == 0) {
-    b.tid = tid;
-    b.reason = w.reason;
-    b.stack = w.stack;
-  }
-  b.ticks += d;
-  b.count += 1;
-  if (stillWaiting) b.stillWaitingAtEnd = true;
-  if (w.wokenBy != kUnknownThread) b.wakers[w.wokenBy] += d;
-}
-
-// A thread whose first event is being readied or switched in was already off the CPU when
-// the trace started. Opens that period from the start of the window. Its wait reason is not
-// known, so it is classified from the stack that arrives at its switch-in.
-void OpenPeriodFromWindowStart(ThreadState& st, uint64_t ts) {
-  if (st.seen || st.offCpu) return;
-  st.open = OffCpu{};
-  st.open.start = g_firstTs != 0 ? g_firstTs : ts;
-  st.open.reason = kReasonUnknown;
-  st.open.isWait = true;
-  st.offCpu = true;
-}
-
-// Records a finished wait whose call stack never arrived.
-void RecordWithoutStack(uint32_t tid, ThreadState& st, const OffCpu& w) {
-  ++g_waitsWithoutStack;
-  Record(tid, st, w, false);
-}
 
 void OnCSwitch(const EVENT_RECORD* ev, uint64_t ts) {
   if (ev->UserDataLength < sizeof(CSwitchPayload)) return;
   CSwitchPayload c;
   std::memcpy(&c, ev->UserData, sizeof c);
-  if (g_firstTs == 0) g_firstTs = ts;
-  g_lastTs = ts;
-  ++g_contextSwitches;
 
   const unsigned cpu = ev->BufferContext.ProcessorNumber;
   if (cpu < g_cpuThread.size()) g_cpuThread[cpu] = c.newThreadId;
 
-  if (g_dump && (g_targetThreads.count(c.oldThreadId) || g_targetThreads.count(c.newThreadId))) {
+  if (g_dump && (g_analysis.IsTarget(c.oldThreadId) || g_analysis.IsTarget(c.newThreadId))) {
     std::fprintf(g_dump, "CSWITCH ts=%llu cpu=%u old=%u new=%u oldState=%d oldReason=%d\n",
                  static_cast<unsigned long long>(ts), cpu, c.oldThreadId, c.newThreadId,
                  c.oldThreadState, c.oldThreadWaitReason);
     ++g_dumpLines;
   }
 
-  // A thread of the target process leaves the CPU.
-  if (g_targetThreads.count(c.oldThreadId)) {
-    ThreadState& st = g_threads[c.oldThreadId];
-    if (!st.seen && !st.offCpu) {  // it was already running when the trace started
-      st.running = true;
-      st.runStart = g_firstTs;
-    }
-    st.seen = true;
-    if (st.running) {
-      st.runTicks += ts - st.runStart;
-      st.running = false;
-    }
-    // An exited thread never comes back, so there is no off-CPU period to open.
-    if (c.oldThreadState != kThreadStateTerminated) {
-      // Earlier waits still awaiting their stack stay in `awaitingStack`, separate from this.
-      st.open = OffCpu{};
-      st.open.start = ts;
-      st.open.reason = c.oldThreadWaitReason;
-      st.open.isWait = (c.oldThreadState == kThreadStateWaiting);
-      st.offCpu = true;
-    }
-  }
-
-  // A thread of the target process gets back on a CPU.
-  if (g_targetThreads.count(c.newThreadId)) {
-    ThreadState& st = g_threads[c.newThreadId];
-    OpenPeriodFromWindowStart(st, ts);
-    st.seen = true;
-    if (st.offCpu) {
-      st.open.end = ts;
-      st.offCpu = false;
-      if (!st.open.isWait || !g_stacksOn) {
-        Record(c.newThreadId, st, st.open, false);  // no stack needed, or none will come
-      } else {
-        // Its user-mode stack is logged after this event, possibly much later: either for
-        // this switch-in, or for an earlier one when the thread has not been back in user
-        // mode since (W14). OnStackWalk finds it by timestamp either way.
-        st.awaitingStack.emplace(ts, std::move(st.open));
-        if (st.awaitingStack.size() > kMaxWaitsAwaitingStack) {
-          auto oldest = st.awaitingStack.begin();
-          RecordWithoutStack(c.newThreadId, st, oldest->second);
-          st.awaitingStack.erase(oldest);
-        }
-      }
-    }
-    st.running = true;
-    st.runStart = ts;
-  }
+  SwitchEvent e;
+  e.ts = ts;
+  e.oldTid = c.oldThreadId;
+  e.newTid = c.newThreadId;
+  e.oldState = c.oldThreadState;
+  e.oldWaitReason = c.oldThreadWaitReason;
+  g_analysis.OnSwitch(e);
 }
 
 void OnReadyThread(const EVENT_RECORD* ev) {
   if (ev->UserDataLength < sizeof(uint32_t)) return;
   uint32_t readied;
   std::memcpy(&readied, ev->UserData, sizeof readied);
-  if (!g_targetThreads.count(readied)) return;
+  if (!g_analysis.IsTarget(readied)) return;
   // Payload: uint32 TThreadId, int8 AdjustReason, int8 AdjustIncrement, int8 Flag, int8 spare.
   const uint8_t flag = ev->UserDataLength >= 7 ? static_cast<const uint8_t*>(ev->UserData)[6] : 0;
+  const auto ts = static_cast<uint64_t>(ev->EventHeader.TimeStamp.QuadPart);
+  const unsigned cpu = ev->BufferContext.ProcessorNumber;
   if (g_dump) {
     std::fprintf(g_dump, "READY ts=%llu cpu=%u readied=%u headerThread=%u flag=0x%02x\n",
-                 static_cast<unsigned long long>(ev->EventHeader.TimeStamp.QuadPart),
-                 static_cast<unsigned>(ev->BufferContext.ProcessorNumber), readied,
+                 static_cast<unsigned long long>(ts), cpu, readied,
                  static_cast<unsigned>(ev->EventHeader.ThreadId), flag);
     ++g_dumpLines;
   }
-  ThreadState& st = g_threads[readied];
-  OpenPeriodFromWindowStart(st, static_cast<uint64_t>(ev->EventHeader.TimeStamp.QuadPart));
-  if (!st.offCpu) return;
-  if (st.open.readyAt == 0)
-    st.open.readyAt = static_cast<uint64_t>(ev->EventHeader.TimeStamp.QuadPart);
-  // A DPC (a timer firing, an I/O finishing) borrows whatever thread happens to be on the
-  // CPU; that thread did not wake ours, the system did.
-  if (flag & kReadyFlagFromDpc) {
-    st.open.wokenBy = kSystemWaker;
-    return;
-  }
-  // The event is logged by the thread that readied ours, so its header names the waker.
-  // The thread last switched in on this CPU is the fallback when the header has no thread.
-  uint32_t by = ev->EventHeader.ThreadId;
-  if (by == kUnknownThread) {
-    const unsigned cpu = ev->BufferContext.ProcessorNumber;
-    by = cpu < g_cpuThread.size() ? g_cpuThread[cpu] : kUnknownThread;
-  }
-  st.open.wokenBy = by;
+  ReadyEvent e;
+  e.ts = ts;
+  e.readiedTid = readied;
+  e.byTid = ResolveWaker(flag, ev->EventHeader.ThreadId,
+                         cpu < g_cpuThread.size() ? g_cpuThread[cpu] : kUnknownThread);
+  g_analysis.OnReady(e);
 }
 
 // Thread start, end and rundown events all begin with uint32 ProcessId, uint32 TThreadId.
-bool ReadThreadEvent(const EVENT_RECORD* ev, uint32_t* pid, uint32_t* tid) {
-  if (ev->UserDataLength < 2 * sizeof(uint32_t)) return false;
-  std::memcpy(pid, ev->UserData, sizeof *pid);
-  std::memcpy(tid, static_cast<const uint8_t*>(ev->UserData) + 4, sizeof *tid);
-  return true;
-}
-
-// `created` is true for a thread created during the trace, false for the rundown of threads
-// that already existed when it started.
-void OnThreadStart(const EVENT_RECORD* ev, bool created) {
-  uint32_t pid, tid;
-  if (!ReadThreadEvent(ev, &pid, &tid) || pid != g_pid) return;
-  g_targetThreads.insert(tid);
-  g_exitedThreads.erase(tid);
-  // A new thread was not blocked or running before the trace, so the window-start periods
-  // (W6) do not apply to it. A reused thread ID keeps adding to the same totals.
-  if (created) g_threads[tid].seen = true;
-}
-
-// The thread ID can be reused by a new thread, possibly in another process, so it stops
-// being tracked here. What it did so far stays in the report.
-void OnThreadEnd(const EVENT_RECORD* ev, uint64_t ts) {
-  uint32_t pid, tid;
-  if (!ReadThreadEvent(ev, &pid, &tid) || pid != g_pid || !g_targetThreads.count(tid)) return;
-  ThreadState& st = g_threads[tid];
-  if (st.running && ts > st.runStart) st.runTicks += ts - st.runStart;
-  st.running = false;
-  for (auto& entry : st.awaitingStack) RecordWithoutStack(tid, st, entry.second);
-  st.awaitingStack.clear();
-  st.offCpu = false;
-  st.seen = true;
-  g_targetThreads.erase(tid);
-  g_exitedThreads.insert(tid);
+void OnThreadEvent(const EVENT_RECORD* ev, ThreadEvent::Kind kind) {
+  if (ev->UserDataLength < 2 * sizeof(uint32_t)) return;
+  ThreadEvent e;
+  e.ts = static_cast<uint64_t>(ev->EventHeader.TimeStamp.QuadPart);
+  e.kind = kind;
+  std::memcpy(&e.pid, ev->UserData, sizeof e.pid);
+  std::memcpy(&e.tid, static_cast<const uint8_t*>(ev->UserData) + 4, sizeof e.tid);
+  g_analysis.OnThread(e);
 }
 
 void OnStackWalk(const EVENT_RECORD* ev) {
   // Layout: uint64 EventTimeStamp, uint32 StackProcess, uint32 StackThread, then addresses.
   if (ev->UserDataLength < 16) return;
   const auto* p = static_cast<const uint8_t*>(ev->UserData);
-  uint64_t eventTs;
-  uint32_t stackTid;
-  std::memcpy(&eventTs, p, sizeof eventTs);
-  std::memcpy(&stackTid, p + 12, sizeof stackTid);
-  if (!g_targetThreads.count(stackTid)) return;
+  StackEvent e;
+  e.ts = static_cast<uint64_t>(ev->EventHeader.TimeStamp.QuadPart);
+  std::memcpy(&e.eventTs, p, sizeof e.eventTs);
+  std::memcpy(&e.tid, p + 12, sizeof e.tid);
+  if (!g_analysis.IsTarget(e.tid)) return;
   const size_t ptrSize = (ev->EventHeader.Flags & EVENT_HEADER_FLAG_64_BIT_HEADER) ? 8 : 4;
   const size_t frames = (ev->UserDataLength - 16) / ptrSize;
 
-  if (g_dump) {
-    unsigned long long kernelFrames = 0, userFrames = 0, firstUser = 0;
-    for (size_t i = 0; i < frames; ++i) {
-      uint64_t addr = 0;
-      std::memcpy(&addr, p + 16 + i * ptrSize, ptrSize);
-      if (addr >= kUserSpaceLimit) {
-        ++kernelFrames;
-      } else if (addr != 0 && userFrames++ == 0) {
-        firstUser = addr;
-      }
-    }
-    std::fprintf(g_dump,
-                 "STACK ts=%llu eventTs=%llu tid=%u kernelFrames=%llu userFrames=%llu "
-                 "firstUser=0x%llx\n",
-                 static_cast<unsigned long long>(ev->EventHeader.TimeStamp.QuadPart),
-                 static_cast<unsigned long long>(eventTs), stackTid, kernelFrames, userFrames,
-                 firstUser);
-    ++g_dumpLines;
-  }
-
-  ThreadState& st = g_threads[stackTid];
-  std::vector<uint64_t> userStack;
+  unsigned long long kernelFrames = 0;
   for (size_t i = 0; i < frames; ++i) {
     uint64_t addr = 0;
     std::memcpy(&addr, p + 16 + i * ptrSize, ptrSize);
-    if (addr != 0 && addr < kUserSpaceLimit) userStack.push_back(addr);
+    if (addr >= kUserSpaceLimit) {
+      ++kernelFrames;
+    } else if (addr != 0) {
+      e.userFrames.push_back(addr);
+    }
   }
 
-  // One stack can arrive as two events with the same EventTimeStamp: the kernel part,
-  // logged at the switch, and the user part, logged once the thread is back in user mode.
-  // Only user-mode frames are kept, so the kernel part is skipped and the wait keeps
-  // waiting for its user part (W1).
-  if (userStack.empty()) {
-    if (st.awaitingStack.count(eventTs)) ++g_kernelOnlyFragments;
-    return;
+  if (g_dump) {
+    std::fprintf(g_dump,
+                 "STACK ts=%llu eventTs=%llu tid=%u kernelFrames=%llu userFrames=%llu "
+                 "firstUser=0x%llx\n",
+                 static_cast<unsigned long long>(e.ts), static_cast<unsigned long long>(e.eventTs),
+                 e.tid, kernelFrames, static_cast<unsigned long long>(e.userFrames.size()),
+                 static_cast<unsigned long long>(e.userFrames.empty() ? 0 : e.userFrames.front()));
+    ++g_dumpLines;
   }
 
-  // The user part is stamped with the switch-in it was captured for, and the thread can block
-  // several more times before it gets back to user mode and the part is logged. Every wait
-  // that ended in between happened inside the same call into the kernel, so they all share
-  // this stack (W14). The stamped switch-in itself may have ended a preemption, not a wait.
-  // Waits that ended before it belong to an earlier user-mode stack and are left alone.
-  const auto delivered = static_cast<uint64_t>(ev->EventHeader.TimeStamp.QuadPart);
-  auto it = st.awaitingStack.lower_bound(eventTs);
-  const auto last = st.awaitingStack.upper_bound((std::max)(delivered, eventTs));
-  while (it != last) {
-    it->second.stack = userStack;
-    ++g_waitsWithStack;
-    Record(stackTid, st, it->second, false);
-    it = st.awaitingStack.erase(it);
-  }
+  g_analysis.OnStack(e);
 }
 
 void WINAPI OnEvent(PEVENT_RECORD ev) {
@@ -464,27 +245,15 @@ void WINAPI OnEvent(PEVENT_RECORD ev) {
       OnCSwitch(ev, static_cast<uint64_t>(h.TimeStamp.QuadPart));
     } else if (op == kOpReadyThread) {
       OnReadyThread(ev);
-    } else if (op == kOpThreadStart || op == kOpThreadDcStart) {
-      OnThreadStart(ev, op == kOpThreadStart);
+    } else if (op == kOpThreadStart) {
+      OnThreadEvent(ev, ThreadEvent::Kind::Created);
+    } else if (op == kOpThreadDcStart) {
+      OnThreadEvent(ev, ThreadEvent::Kind::Existing);
     } else if (op == kOpThreadEnd) {
-      OnThreadEnd(ev, static_cast<uint64_t>(h.TimeStamp.QuadPart));
+      OnThreadEvent(ev, ThreadEvent::Kind::Ended);
     }
   } else if (IsEqualGUID(h.ProviderId, kStackWalkGuid) && op == kOpStackWalk) {
     OnStackWalk(ev);
-  }
-}
-
-// Called after tracing stops: close out anything still in progress.
-void FlushAtEnd() {
-  for (auto& [tid, st] : g_threads) {
-    if (st.running && g_lastTs > st.runStart) st.runTicks += g_lastTs - st.runStart;
-    for (auto& entry : st.awaitingStack) RecordWithoutStack(tid, st, entry.second);
-    st.awaitingStack.clear();
-    if (st.offCpu && g_lastTs > st.open.start) {
-      st.open.end = g_lastTs;  // still off the CPU when the trace ended
-      Record(tid, st, st.open, true);
-    }
-    st.offCpu = false;
   }
 }
 
@@ -592,13 +361,9 @@ void SnapshotThreads(uint32_t pid) {
   THREADENTRY32 te{};
   te.dwSize = sizeof te;
   for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
-    if (te.th32OwnerProcessID == pid) g_targetThreads.insert(te.th32ThreadID);
+    if (te.th32OwnerProcessID == pid) g_analysis.targetThreads.insert(te.th32ThreadID);
   }
   CloseHandle(snap);
-}
-
-bool IsProgramThread(uint32_t tid) {
-  return g_targetThreads.count(tid) != 0 || g_exitedThreads.count(tid) != 0;
 }
 
 std::string ThreadLabel(uint32_t tid) {
@@ -607,7 +372,7 @@ std::string ThreadLabel(uint32_t tid) {
   if (it != cache.end()) return it->second;
   std::string label = "Thread " + std::to_string(tid);
   // Its ID may already belong to another thread, so do not look up a name for it.
-  if (g_exitedThreads.count(tid)) return cache[tid] = label + " (exited)";
+  if (g_analysis.exitedThreads.count(tid)) return cache[tid] = label + " (exited)";
   using GetDescFn = HRESULT(WINAPI*)(HANDLE, PWSTR*);
   static GetDescFn getDesc = reinterpret_cast<GetDescFn>(reinterpret_cast<void*>(
       GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetThreadDescription")));
@@ -657,33 +422,21 @@ bool SnapshotStack(HANDLE proc, uint32_t tid, std::vector<uint64_t>* frames) {
   return true;
 }
 
-// A thread that is off the CPU when the trace ends never gets the stack that is logged at
-// its next switch-in, and a thread blocked for the whole window has no events at all. Both
-// get one stack snapshot instead. A whole-window thread becomes one wait from the window
-// start; FlushAtEnd records both as still waiting at the end.
+// Threads still blocked when the trace ends, or blocked for the whole window, get one stack
+// snapshot each (W7); the analysis decides which ones need it.
 void SnapshotThreadsStillBlocked() {
-  HANDLE proc = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, g_pid);
+  HANDLE proc = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, g_analysis.pid);
   if (!proc) return;
   SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_FAIL_CRITICAL_ERRORS);
   if (!SymInitializeW(proc, nullptr, TRUE)) {
     CloseHandle(proc);
     return;
   }
-  for (uint32_t tid : g_targetThreads) {
-    ThreadState& st = g_threads[tid];
-    const bool blockedWholeWindow = !st.seen && !st.offCpu;
-    if (!blockedWholeWindow && !(st.offCpu && st.open.isWait)) continue;
+  for (uint32_t tid : g_analysis.targetThreads) {
+    if (!g_analysis.NeedsSnapshot(tid)) continue;
     std::vector<uint64_t> frames;
     if (!SnapshotStack(proc, tid, &frames)) continue;  // gone; leave it as never seen
-    if (blockedWholeWindow) {
-      st.open = OffCpu{};
-      st.open.start = g_firstTs;
-      st.open.reason = kReasonUnknown;
-      st.open.isWait = true;
-      st.offCpu = true;
-      st.seen = true;
-    }
-    st.open.stack = std::move(frames);
+    g_analysis.ApplySnapshot(tid, std::move(frames));
   }
   SymCleanup(proc);
   CloseHandle(proc);
@@ -899,7 +652,7 @@ uint32_t TopWaker(const Bucket& b) {
 
 std::string WakerLabel(uint32_t tid) {
   if (tid == kUnknownThread) return "unknown";
-  if (IsProgramThread(tid)) return ThreadLabel(tid);
+  if (g_analysis.IsProgramThread(tid)) return ThreadLabel(tid);
   if (tid == kSystemWaker) return "the system (a timer or finished I/O)";
   return "outside your program (thread " + std::to_string(tid) + ")";
 }
@@ -918,16 +671,17 @@ std::string FormatDuration(double seconds) {
 // ---------------------------------------------------------------------------
 
 void PrintReport(double ticksPerSecond, int topN, const SessionProps& stopped, bool stacksOn) {
-  const double window = g_lastTs > g_firstTs ? (g_lastTs - g_firstTs) / ticksPerSecond : 0.0;
+  const Analyzer& an = g_analysis;
+  const double window = an.lastTs > an.firstTs ? (an.lastTs - an.firstTs) / ticksPerSecond : 0.0;
   auto secs = [&](uint64_t ticks) { return ticks / ticksPerSecond; };
   auto pct = [&](uint64_t ticks) { return window > 0 ? 100.0 * secs(ticks) / window : 0.0; };
 
   Symbolizer sym;
-  bool symbolsOk = sym.Init(g_pid);
+  bool symbolsOk = sym.Init(an.pid);
 
   std::printf("\n==============================================================\n");
   std::printf(" waitwhy report: %s (PID %u), watched for %s\n",
-              sym.ExeFile().empty() ? "process" : sym.ExeFile().c_str(), g_pid,
+              sym.ExeFile().empty() ? "process" : sym.ExeFile().c_str(), an.pid,
               FormatDuration(window).c_str());
   std::printf("==============================================================\n");
   if (stopped.props.EventsLost || stopped.props.RealTimeBuffersLost)
@@ -938,21 +692,21 @@ void PrintReport(double ticksPerSecond, int topN, const SessionProps& stopped, b
 
   // Per-thread summary.
   std::vector<uint32_t> tids;  // includes threads that exited during the trace
-  for (const auto& [tid, st] : g_threads)
+  for (const auto& [tid, st] : an.threads)
     if (st.seen) tids.push_back(tid);
   int unseen = 0;
-  for (uint32_t tid : g_targetThreads) {
-    auto it = g_threads.find(tid);
-    if (it == g_threads.end() || !it->second.seen) ++unseen;
+  for (uint32_t tid : an.targetThreads) {
+    auto it = an.threads.find(tid);
+    if (it == an.threads.end() || !it->second.seen) ++unseen;
   }
-  std::sort(tids.begin(), tids.end(), [](uint32_t a, uint32_t b) {
-    return g_threads[a].waitTicks > g_threads[b].waitTicks;
+  std::sort(tids.begin(), tids.end(), [&an](uint32_t x, uint32_t y) {
+    return an.threads.at(x).waitTicks > an.threads.at(y).waitTicks;
   });
 
   std::printf("\nWhere each thread's time went\n");
   std::printf("  %-30s %10s %10s %12s\n", "Thread", "Running", "Waiting", "Wanted CPU");
   for (uint32_t tid : tids) {
-    const ThreadState& st = g_threads[tid];
+    const ThreadState& st = an.threads.at(tid);
     std::printf("  %-30.30s %9.0f%% %9.0f%% %11.0f%%\n", ThreadLabel(tid).c_str(),
                 pct(st.runTicks), pct(st.waitTicks), pct(st.readyTicks));
   }
@@ -962,7 +716,7 @@ void PrintReport(double ticksPerSecond, int topN, const SessionProps& stopped, b
 
   // Biggest waits.
   std::vector<const Bucket*> buckets;
-  for (auto& [key, b] : g_buckets) buckets.push_back(&b);
+  for (auto& [key, b] : an.buckets) buckets.push_back(&b);
   std::sort(buckets.begin(), buckets.end(),
             [](const Bucket* a, const Bucket* b) { return a->ticks > b->ticks; });
 
@@ -1000,7 +754,7 @@ void PrintReport(double ticksPerSecond, int topN, const SessionProps& stopped, b
       std::printf("  * %s spent %.0f%% of the time %s, in %s.\n", ThreadLabel(tid).c_str(),
                   pct(b->ticks), CategorySentence(c), YourCodeFrame(*b, sym).c_str());
       uint32_t waker = TopWaker(*b);
-      if (c == Category::Lock && IsProgramThread(waker) && waker != tid) {
+      if (c == Category::Lock && g_analysis.IsProgramThread(waker) && waker != tid) {
         // What was the thread that released the lock busy with?
         for (const Bucket* wb : buckets) {
           if (wb->tid != waker) continue;
@@ -1016,7 +770,7 @@ void PrintReport(double ticksPerSecond, int topN, const SessionProps& stopped, b
         }
       }
     }
-    const ThreadState& st = g_threads[tid];
+    const ThreadState& st = an.threads.at(tid);
     if (pct(st.readyTicks) >= 20.0) {
       anyFinding = printedForThread = true;
       std::printf("  * %s spent %.0f%% of the time ready to run but waiting for a free CPU.\n"
@@ -1030,10 +784,10 @@ void PrintReport(double ticksPerSecond, int topN, const SessionProps& stopped, b
 
   std::printf("\n(%llu context switches seen, %llu waits with a call stack,"
               " %llu waits without a call stack, %llu kernel-only stack parts)\n",
-              static_cast<unsigned long long>(g_contextSwitches),
-              static_cast<unsigned long long>(g_waitsWithStack),
-              static_cast<unsigned long long>(g_waitsWithoutStack),
-              static_cast<unsigned long long>(g_kernelOnlyFragments));
+              static_cast<unsigned long long>(an.contextSwitches),
+              static_cast<unsigned long long>(an.waitsWithStack),
+              static_cast<unsigned long long>(an.waitsWithoutStack),
+              static_cast<unsigned long long>(an.kernelOnlyFragments));
 }
 
 void Usage() {
@@ -1055,6 +809,7 @@ void Usage() {
 #ifndef WAITWHY_NO_MAIN
 int wmain(int argc, wchar_t** argv) {
   SetConsoleOutputCP(CP_UTF8);
+  uint32_t& pid = g_analysis.pid;
   std::wstring name;
   std::wstring dumpPath;
   int seconds = 10;
@@ -1063,7 +818,7 @@ int wmain(int argc, wchar_t** argv) {
     std::wstring a = argv[i];
     bool hasValue = i + 1 < argc;
     if (a == L"--pid" && hasValue) {
-      g_pid = static_cast<uint32_t>(std::wcstoul(argv[++i], nullptr, 10));
+      pid = static_cast<uint32_t>(std::wcstoul(argv[++i], nullptr, 10));
     } else if (a == L"--name" && hasValue) {
       name = argv[++i];
     } else if (a == L"--seconds" && hasValue) {
@@ -1077,20 +832,20 @@ int wmain(int argc, wchar_t** argv) {
       return kExitUsage;
     }
   }
-  if (!name.empty() && !FindProcessByName(name, &g_pid)) {
+  if (!name.empty() && !FindProcessByName(name, &pid)) {
     std::printf("No running process named %s.\n", Narrow(name).c_str());
     return kExitUsage;
   }
-  if (g_pid == 0) {
+  if (pid == 0) {
     Usage();
     return kExitUsage;
   }
-  HANDLE target = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, g_pid);
+  HANDLE target = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
   if (!target) {
-    std::printf("Cannot open PID %u. Is it running, and are you running as Administrator?\n", g_pid);
+    std::printf("Cannot open PID %u. Is it running, and are you running as Administrator?\n", pid);
     return kExitUsage;
   }
-  SnapshotThreads(g_pid);
+  SnapshotThreads(pid);
 
   LARGE_INTEGER freq;
   QueryPerformanceFrequency(&freq);
@@ -1110,7 +865,7 @@ int wmain(int argc, wchar_t** argv) {
                  "# CSWITCH ts cpu old new oldState oldReason\n"
                  "# READY   ts cpu readied headerThread flag\n"
                  "# STACK   ts eventTs tid kernelFrames userFrames firstUser\n",
-                 g_pid, static_cast<long long>(freq.QuadPart));
+                 pid, static_cast<long long>(freq.QuadPart));
   }
 
   TRACEHANDLE session = 0;
@@ -1125,7 +880,7 @@ int wmain(int argc, wchar_t** argv) {
   }
   SetConsoleCtrlHandler(OnCtrl, TRUE);
   const bool stacksOn = EnableContextSwitchStacks(session);
-  g_stacksOn = stacksOn;
+  g_analysis.stacksOn = stacksOn;
 
   EVENT_TRACE_LOGFILEW logfile{};
   logfile.LoggerName = const_cast<LPWSTR>(kLoggerName);
@@ -1140,7 +895,7 @@ int wmain(int argc, wchar_t** argv) {
   }
   std::thread reader([&consumer] { ProcessTrace(&consumer, 1, nullptr, nullptr); });
 
-  std::printf("Watching PID %u (%zu threads) for %d seconds", g_pid, g_targetThreads.size(),
+  std::printf("Watching PID %u (%zu threads) for %d seconds", pid, g_analysis.targetThreads.size(),
               seconds);
   std::fflush(stdout);
   for (int tenth = 0; tenth < seconds * 10 && !g_stopRequested; ++tenth) {
@@ -1167,8 +922,8 @@ int wmain(int argc, wchar_t** argv) {
                 Narrow(dumpPath).c_str());
   }
 
-  if (g_firstTs != 0) SnapshotThreadsStillBlocked();
-  FlushAtEnd();
+  if (g_analysis.firstTs != 0) SnapshotThreadsStillBlocked();
+  g_analysis.FlushAtEnd();
   PrintReport(static_cast<double>(freq.QuadPart), topN, stopped, stacksOn);
   return kExitOk;
 }

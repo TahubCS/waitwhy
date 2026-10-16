@@ -24,15 +24,20 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "slowapp.cpp did not compile" }
           cl /nologo /EHsc /O2 /Zi /std:c++17 waitwhy.cpp /Fe:waitwhy.exe
           if ($LASTEXITCODE -ne 0) { throw "waitwhy.cpp did not compile" }
-          cl /nologo /EHsc /O2 /std:c++17 /DWAITWHY_NO_MAIN tests\replay_events.cpp /Fe:replay_events.exe
+          cl /nologo /EHsc /O2 /std:c++17 tests\replay_events.cpp /Fe:replay_events.exe
           if ($LASTEXITCODE -ne 0) { throw "tests\replay_events.cpp did not compile" }
+          cl /nologo /EHsc /O2 /std:c++17 /DWAITWHY_NO_MAIN tests\decode_tests.cpp /Fe:decode_tests.exe
+          if ($LASTEXITCODE -ne 0) { throw "tests\decode_tests.cpp did not compile" }
 
-      # Replays a recorded trace through waitwhy's event handlers; needs no kernel trace.
+      # Replays a recorded trace through the analysis core, and through waitwhy's ETW decoding;
+      # needs no kernel trace.
       - name: Replay recorded trace
         shell: pwsh
         run: |
           .\replay_events.exe docs\traces\buggy-64mb-events.txt
           if ($LASTEXITCODE -ne 0) { throw "replaying docs\traces\buggy-64mb-events.txt failed" }
+          .\decode_tests.exe docs\traces\buggy-64mb-events.txt
+          if ($LASTEXITCODE -ne 0) { throw "decoding docs\traces\buggy-64mb-events.txt failed" }
 
       # C8 smoke test: waitwhy must report the lock bug in buggy slowapp and nothing in fixed
       # slowapp. GitHub's Windows runners run as Administrator, which kernel tracing needs.
@@ -79,3 +84,20 @@ jobs:
           foreach ($f in $failures) { Write-Host "::error::$f" }
           if ($failures.Count -gt 0) { exit 1 }
           Write-Host 'C8 holds: the bug is reported in the buggy run and not in the fixed run.'
+
+  # The analysis core (analysis.h) makes no Windows calls (D7), so its tests also run here, with
+  # GCC and Clang and every warning as an error.
+  analysis-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and run the analysis tests (GCC and Clang)
+        run: |
+          set -e
+          for cxx in g++ clang++; do
+            echo "::group::$cxx"
+            $cxx -std=c++17 -O2 -Wall -Wextra -Wshadow -Werror tests/replay_events.cpp -o replay_events
+            ./replay_events docs/traces/buggy-64mb-events.txt
+            echo "::endgroup::"
+          done

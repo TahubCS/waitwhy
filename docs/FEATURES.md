@@ -216,3 +216,4 @@ Newest line last. Format: `YYYY-MM-DD  ID  status  note`.
 - 2026-10-16  D7–D11  recorded  Decided by the user (ROADMAP X1, X3, X4, X5, X9).
 - 2026-10-16  W15–W40  proposed  From the build-out plan of 2026-10-16.
 - 2026-10-16  W15–W40  approved  By the user, together with the plan. The user also asked for commits straight to main as TahubCS, without PRs.
+- 2026-10-16  W15  started  analysis.h holds the state machine, stack matcher and buckets; waitwhy.cpp decodes into it. Replay test is portable and runs on Linux CI; tests/decode_tests.cpp replays through OnEvent on Windows.
