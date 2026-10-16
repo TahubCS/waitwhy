@@ -6,6 +6,25 @@ planned silently; they are listed under [Decisions needed](#4-decisions-needed) 
 for the user. Roadmap items use `R` numbers; an item gets its permanent `W` number when it
 is approved and recorded in `FEATURES.md`.
 
+**Update 2026-10-16.** The user decided X1, X3, X4, X5 and X9 (now D7–D11 in `FEATURES.md`)
+and approved the build-out plan. These R items now have W numbers:
+
+| R | W | R | W | R | W |
+|---|---|---|---|---|---|
+| R1 | done (W14 evidence, `docs/traces/`) | R10 | W25 | R21 | W32 |
+| R2 | D11, `LICENSE` | R11 | W21 | R22 | W33 |
+| R3 | W17 | R12 | W20 | R23 | W38 |
+| R4 | W19 | R13 | W24 | R24 | W39 |
+| R5 | W14 (done) | R14 | W29 | R25 | W34 |
+| R6 | W27 | R15 | W15, W16, W19 | R26 | W36 |
+| R7 | W26 | R16 | W15, W16 | R27 | W37 |
+| R8 | W28 | R17 | W19 | R28 | W31 |
+| R9 | W22, W23 | R20 | W30 | R29 | W40 |
+|  |  |  |  | R39 | W35 (diff only) |
+
+Still proposals: R18, R19, R30–R38, the GitHub Action wrapper half of R39, and R40–R42.
+Still open decisions: X6, X7, X8 and X10.
+
 ## 1. Where waitwhy stands
 
 ### What works (W1–W13, all in `main`)

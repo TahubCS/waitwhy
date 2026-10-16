@@ -26,20 +26,17 @@ was stuck in (DbgHelp + .pdb); and which thread woke it up.
 - `FEATURES.md` is append-only. Never delete, reword or renumber an existing entry. Add new
   entries at the end of a section and record status changes as new lines in its status log.
   A new entry must not contradict an earlier one; if it would, stop and ask the user.
-- Name each branch after the change it holds, never with a `claude/` prefix. For a work
-  item use `w<N>-short-description`; otherwise a short description of the change. One work
-  item per branch. Create it from `main`:
-
-  ```powershell
-  git checkout -b w2-match-stacks-by-timestamp main
-  git push -u origin w2-match-stacks-by-timestamp
-  ```
+- Commit straight to `main` and push it; do not open pull requests. Author and committer are
+  `TahubCS <khatrim23@students.ecu.edu>` (set in the repository's git config), with no
+  Claude co-author or session trailers. One work item per commit, or a few commits for a
+  large item; the message starts with its `W` number. After each push, check the GitHub
+  Actions run and fix a red build before anything else.
 
 ## File layout
 
 | File | Purpose |
 |---|---|
-| `waitwhy.cpp` | The tool: ETW session, event callbacks, wait bookkeeping, symbolization, report. Single file. |
+| `waitwhy.cpp` | The tool: ETW session, event callbacks, wait bookkeeping, symbolization, report. Moves its analysis core into `analysis.h` (D7, W15). |
 | `slowapp.cpp` | Test target with a deliberate bug: the `saver` thread holds a mutex during a slow disk write, so `main` blocks in `update_frame`. `--fixed` moves the write outside the lock. |
 | `run-demo.ps1` | Builds both programs (MSVC x64) and runs waitwhy against buggy, then fixed, slowapp. Needs an Administrator shell. |
 | `README.md` | User-facing description, demo instructions, known limitations. |
@@ -48,6 +45,7 @@ was stuck in (DbgHelp + .pdb); and which thread woke it up.
 | `TRACE-FINDINGS.md` | Analysis of a real captured trace (`docs/traces/`): how stacks arrive, the evidence behind W14. |
 | `docs/traces/` | Captured `--dump-events` files and their reports, kept byte for byte as test fixtures. |
 | `tests/replay_events.cpp` | Replays a dump through waitwhy's event handlers (includes `waitwhy.cpp` with `WAITWHY_NO_MAIN`) and checks stack matching. No admin needed; runs in CI. |
+| `LICENSE` | MIT (D11). |
 | `ROADMAP.md` | Proposed phased plan towards a tool others can rely on (`R` items, open decisions `X`). A proposal, not approved; `FEATURES.md` wins on any conflict. |
 
 ## Build

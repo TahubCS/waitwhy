@@ -46,6 +46,24 @@ These define the product. They cannot be removed.
 - **D5. Where tests run.** Tests and the demo are not run in agent sessions. The user runs
   `run-demo.ps1`; automated tests run in GitHub Actions.
 - **D6. Change control.** Any large change needs a short plan and the user's OK first.
+- **D7. Testable analysis core.** The analysis (thread state machine, stack matching,
+  aggregation, classification rules) lives in `analysis.h`: header-only, free of Win32 calls,
+  and included by `waitwhy.cpp`, so the build command does not change. Tests drive it with
+  typed events and need neither Windows nor Administrator. Decided by the user (ROADMAP X1).
+- **D8. Microsoft symbols.** waitwhy may load Windows symbols from Microsoft's public symbol
+  server. It is opt-in, because it uses the network, and keeps a local cache. For this
+  waitwhy may ship Microsoft's redistributable `dbghelp.dll` and `symsrv.dll` beside the
+  exe. They are Microsoft's own components, not third-party libraries in the sense of D3.
+  Decided by the user (ROADMAP X3).
+- **D9. One program may be several processes.** The program of C1 may be a process tree:
+  a program waitwhy launches itself, its child processes, or all running instances of one
+  name. With no such option it is still one running process, as C1 says. Decided by the user
+  as an extension of C1 (ROADMAP X4).
+- **D10. Private trace session.** waitwhy traces through its own system-logger session.
+  Where Windows cannot provide one, it falls back to the shared "NT Kernel Logger" session as
+  before. Decided by the user (ROADMAP X5).
+- **D11. License.** waitwhy is released under the MIT license (`LICENSE`). Decided by the
+  user (ROADMAP X9).
 
 ## Work items
 
@@ -98,6 +116,76 @@ approval before work begins; see the status log.
   can be a resumption after preemption). Each wait keeps its own duration, wait reason, ready
   time and waker; waits before `EventTimeStamp` are never touched. Evidence:
   `docs/TRACE-FINDINGS.md` and `docs/traces/buggy-64mb-events.txt`. Serves C5.
+- **W15. Analysis core, stage 1.** Move the thread state machine, the stack matcher and
+  aggregation into `analysis.h` (D7), driven by typed context-switch, ready-thread, stack and
+  thread events. `waitwhy.cpp` keeps decoding the kernel events into them. The replay test
+  feeds typed events and also runs on Linux in CI. Serves C3, C5, C6.
+- **W16. Classification and frame choice in the core.** Move wait classification, the
+  runtime-frame filter and the choice of "your code" and "blocked in" frames into
+  `analysis.h` behind a symbol-source interface, with one unit test per rule. Serves C4, C5.
+- **W17. Warnings as errors.** Build waitwhy, slowapp and the tests with `/W4 /WX` in CI and
+  in `run-demo.ps1`. Serves C8.
+- **W18. Event dump, version 2.** `--dump-events` also writes thread start and end, image
+  loads, the full user-mode stack of each stack event, and a table naming every address in
+  the dump. Version 1 dumps still replay. CI keeps the dumps of its smoke runs. Serves C5.
+- **W19. Report model and golden tests.** The report is built as plain data first and then
+  printed. A recorded dump replays to an exact expected report in CI. The report lines that
+  CI and scripts match are listed in the README and kept stable. Serves C7, C8.
+- **W20. Exact observation window.** The window runs from the start to the stop of tracing.
+  A thread's percentages are of its own lifetime inside the window. Serves C3.
+- **W21. Idle threads summarised.** Threads that only wait for work outside the program's
+  code, such as idle thread-pool workers, are counted on one line and are never findings.
+  Serves C7.
+- **W22. Group waits by activity.** Report rows group a thread's waits by category and by the
+  function in the program's code. The blocking system functions are listed as detail.
+  Window-start waits of unknown reason join their category. Rows below `--min-ms` are
+  counted, not printed. Serves C4, C5, C7.
+- **W23. Long single waits.** Each row gives the number of waits, the longest and a 95th
+  percentile. A row also becomes a finding when its longest wait reaches `--stall-ms`, not
+  only when its share of the window is large. Serves C7.
+- **W24. Data quality in every report.** Every report states lost events, the share of wait
+  time with a call stack, waits with an unknown waker, symbol status per module, and an
+  overall confidence. Serves C7.
+- **W25. Wait chains.** For a wait ended by another thread of the program, report what that
+  thread was doing during the wait, measured from its own running and waiting periods, in
+  place of the "most likely" guess. Serves C6, C7.
+- **W26. Module map from the trace.** Record the program's module load addresses from image
+  events, so function names survive the program exiting, and warn about a `.pdb` that does
+  not match its module. Serves C5.
+- **W27. Windows symbols.** `--symbols` and `_NT_SYMBOL_PATH` select symbol paths,
+  including Microsoft's symbol server (D8). The report says which modules have only exported
+  names. Serves C5.
+- **W28. Classify waits by the object waited on.** Use the kernel's file I/O events to name
+  the file object behind a wait. Only files on a disk volume count as the disk, and sockets
+  count as the network. Console and pipe waits keep a category from C4 and name the object
+  as detail. Function names remain the fallback. Serves C4.
+- **W29. Known-answer scenarios.** `scenarios.exe` reproduces one waiting pattern per mode:
+  condition variable, cold file read, console output, named pipe, socket, thread-pool
+  starvation, CPU contention, page faults, waiting on another process, sleep only. CI checks
+  each against its expected top finding. slowapp stays the C8 reference. Serves C4, C8.
+- **W30. Command line, version 1.** Subcommands `watch`, `record`, `analyze` and `diff`,
+  plus `--help` and `--version`. Every error says what to do next. The existing
+  `--pid`/`--name` form keeps working and means `watch`. Serves C1, C7.
+- **W31. Private trace session.** Implements D10, and cleans up sessions left behind by a
+  waitwhy that was killed. Serves C2.
+- **W32. Launch mode.** `waitwhy -- program args` starts the program with tracing already
+  running, so its startup is covered (D9). Serves C1.
+- **W33. Child processes and all instances.** `--children` and `--name X --all` watch a
+  process tree or every instance (D9). The report groups threads by process. Serves C1.
+- **W34. JSON report.** `--format json` writes the report model with a versioned, published
+  schema. Serves C7.
+- **W35. Compare two reports.** `waitwhy diff before.json after.json` exits with its own code
+  when waiting got worse past a threshold, for use as a CI gate. Serves C7.
+- **W36. HTML report.** One self-contained file with a per-thread timeline, the findings
+  with their call stacks, wait chains and an off-CPU flame graph. Serves C7.
+- **W37. Exports.** Write the waits in the speedscope and Chrome trace formats. Serves C7.
+- **W38. Record now, analyse later.** `record` writes a trace file, and `analyze` reports on
+  it later or on another machine, including traces from WPR or xperf with the needed events.
+  Serves C2, C5.
+- **W39. Flight recorder.** `record --ring` keeps the last N seconds and reports on Ctrl+C or
+  on a trigger. Serves C1.
+- **W40. User documentation.** How to read a report, troubleshooting, FAQ, and one page per
+  scenario. Serves C7.
 
 ## Status log
 
@@ -124,3 +212,7 @@ Newest line last. Format: `YYYY-MM-DD  ID  status  note`.
 - 2026-10-13  W14  proposed  From docs/TRACE-FINDINGS.md: one delayed user-stack fragment covers up to six of saver's waits; 702 of them had no stack.
 - 2026-10-13  W14  approved  By the user, including that it extends W2's exact-timestamp rule.
 - 2026-10-13  W14  started  Implemented in waitwhy.cpp. A model of the rule over the recorded trace predicts 1552 waits with a stack and 4 without (was 845 and 711); the replay test checks it.
+- 2026-10-16  W14  confirmed  CI run #59 on main: 0 waits without a call stack (was 711 before W14); C8 holds.
+- 2026-10-16  D7–D11  recorded  Decided by the user (ROADMAP X1, X3, X4, X5, X9).
+- 2026-10-16  W15–W40  proposed  From the build-out plan of 2026-10-16.
+- 2026-10-16  W15–W40  approved  By the user, together with the plan. The user also asked for commits straight to main as TahubCS, without PRs.
