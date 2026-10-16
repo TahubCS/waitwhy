@@ -63,4 +63,11 @@ What this means
     It is most likely holding the lock during that slow work. Move the
     slow work outside the lock (copy the data first, then do the work).
 
-(12345 context switches seen, 5 waits with a call stack, 0 waits without a call stack, 1 kernel-only stack parts)
+Data quality: high
+  Events lost      : none
+  Call stacks      : 100% of wait time (5 waits with a call stack, 0 without; 1 kernel-only stack parts)
+  Wakers known     : 100% of the time in waits that ended
+  Function names   : full names in slowapp; only exported names in KERNELBASE, kernel32, ntdll
+                     (exported names only: a function that is not exported shows
+                     as the nearest exported one, so those names can be wrong)
+  Context switches : 12345 seen

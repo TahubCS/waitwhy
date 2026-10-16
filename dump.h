@@ -21,6 +21,7 @@
 //   EXE        name=<file name of the program>
 //   SYMBOL     addr name=<module!function>         every address in the report's stacks
 //   SOURCE     addr file=<source file, lower case>
+//   MODULE     symbols=full|exports|none name=<module>   how its names were found (W24)
 //   THREADNAME tid name=<label as the report prints it>
 //
 // It makes no Windows calls (D7).
@@ -132,6 +133,12 @@ class DumpSymbols : public SymbolSource {
         const std::string& file = l.text.at("name");
         exeModule_ = Lower(file.substr(0, file.find_last_of('.')));
       }
+      if (l.kind == "MODULE" && l.Has("name") && l.Has("symbols")) {
+        const std::string& k = l.text.at("symbols");
+        kinds_[l.text.at("name")] = k == "full"      ? SymbolKind::Full
+                                    : k == "exports" ? SymbolKind::ExportsOnly
+                                                     : SymbolKind::None;
+      }
     }
   }
   const std::string& Name(uint64_t addr) override {
@@ -146,8 +153,13 @@ class DumpSymbols : public SymbolSource {
     const size_t bang = name.find('!');
     return bang != std::string::npos && Lower(name.substr(0, bang)) == exeModule_;
   }
+  SymbolKind ModuleSymbols(const std::string& module) const override {
+    auto it = kinds_.find(module);
+    return it == kinds_.end() ? SymbolKind::Unknown : it->second;
+  }
 
  private:
+  std::map<std::string, SymbolKind> kinds_;
   std::unordered_map<uint64_t, std::string> names_;
   std::unordered_map<uint64_t, std::string> files_;
   std::string exeModule_;

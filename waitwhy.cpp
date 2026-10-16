@@ -498,15 +498,20 @@ class Symbolizer : public SymbolSource {
     std::string module = "?";
     std::string result;
     if (ok_) {
-      IMAGEHLP_MODULEW64 mi{};
-      mi.SizeOfStruct = sizeof mi;
-      if (SymGetModuleInfoW64(proc_, addr, &mi)) module = Narrow(mi.ModuleName);
       alignas(SYMBOL_INFOW) unsigned char buf[sizeof(SYMBOL_INFOW) + 512 * sizeof(wchar_t)] = {};
       auto* si = reinterpret_cast<SYMBOL_INFOW*>(buf);
       si->SizeOfStruct = sizeof(SYMBOL_INFOW);
       si->MaxNameLen = 512;
       DWORD64 disp = 0;
-      if (SymFromAddrW(proc_, addr, &disp, si)) result = module + "!" + Narrow(si->Name);
+      const bool named = SymFromAddrW(proc_, addr, &disp, si) != FALSE;
+      // Asked after SymFromAddrW, which loads deferred symbols, so SymType is final.
+      IMAGEHLP_MODULEW64 mi{};
+      mi.SizeOfStruct = sizeof mi;
+      if (SymGetModuleInfoW64(proc_, addr, &mi)) {
+        module = Narrow(mi.ModuleName);
+        kinds_[module] = KindOf(mi.SymType);
+      }
+      if (named) result = module + "!" + Narrow(si->Name);
     }
     if (result.empty()) {
       char hex[32];
@@ -534,6 +539,12 @@ class Symbolizer : public SymbolSource {
     return files_[addr] = file;
   }
 
+  SymbolKind ModuleSymbols(const std::string& module) const override {
+    auto it = kinds_.find(module);
+    return it == kinds_.end() ? SymbolKind::Unknown : it->second;
+  }
+  const std::map<std::string, SymbolKind>& ModuleKinds() const { return kinds_; }
+
   bool IsExeFrame(const std::string& name) const override {
     size_t bang = name.find('!');
     return bang != std::string::npos && Lower(name.substr(0, bang)) == exeModule_;
@@ -547,6 +558,15 @@ class Symbolizer : public SymbolSource {
   std::string exeFile_;
   std::unordered_map<uint64_t, std::string> names_;
   std::unordered_map<uint64_t, std::string> files_;
+  std::map<std::string, SymbolKind> kinds_;  // modules named so far
+
+  static SymbolKind KindOf(SYM_TYPE type) {
+    switch (type) {
+      case SymPdb: case SymDia: case SymCv: case SymSym: case SymCoff: return SymbolKind::Full;
+      case SymExport: return SymbolKind::ExportsOnly;
+      default: return SymbolKind::None;
+    }
+  }
 };
 
 // ---------------------------------------------------------------------------
@@ -571,6 +591,10 @@ void WriteDumpNames(FILE* out, Symbolizer& sym, bool symbolsOk) {
       std::fprintf(out, "SOURCE addr=0x%llx file=%s\n", static_cast<unsigned long long>(addr),
                    file.c_str());
   }
+  for (const auto& [module, kind] : sym.ModuleKinds())
+    std::fprintf(out, "MODULE symbols=%s name=%s\n",
+                 kind == SymbolKind::Full ? "full" : kind == SymbolKind::ExportsOnly ? "exports" : "none",
+                 module.c_str());
   std::map<uint32_t, bool> tids;
   for (const auto& [tid, st] : an.threads) tids[tid] = true;
   for (uint32_t tid : an.targetThreads) tids[tid] = true;

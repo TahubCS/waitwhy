@@ -215,6 +215,8 @@ class Analyzer {
   uint64_t waitsWithStack = 0;
   uint64_t waitsWithoutStack = 0;
   uint64_t kernelOnlyFragments = 0;  // stack events for a wait that held no user-mode frame
+  uint64_t endedWaitTicks = 0;        // wait time in waits that ended inside the window
+  uint64_t unknownWakerTicks = 0;     // ... of which no waker was seen (W24)
 
   bool IsTarget(uint32_t tid) const { return targetThreads.count(tid) != 0; }
   bool IsProgramThread(uint32_t tid) const {
@@ -407,6 +409,10 @@ class Analyzer {
     b.count += 1;
     b.durations.Add(d);
     if (stillWaiting) b.stillWaitingAtEnd = true;
+    if (!stillWaiting) {
+      endedWaitTicks += d;
+      if (w.wokenBy == kUnknownThread) unknownWakerTicks += d;
+    }
     if (w.wokenBy != kUnknownThread) b.wakers[w.wokenBy] += d;
   }
 
@@ -450,6 +456,14 @@ class Analyzer {
 // Symbols: what the classification rules need to know about an address
 // ---------------------------------------------------------------------------
 
+// How a module's function names were found (W24).
+enum class SymbolKind {
+  Unknown,      // not recorded (old dumps, tests)
+  Full,         // from the module's .pdb: every function has its own name
+  ExportsOnly,  // only exported functions: others get the nearest export's name
+  None,         // no names at all
+};
+
 // Names code addresses. waitwhy.cpp implements it with DbgHelp; tests use a fixed table.
 class SymbolSource {
  public:
@@ -461,6 +475,11 @@ class SymbolSource {
   virtual const std::string& SourceFile(uint64_t addr) = 0;
   // True when `name` (as returned by Name) is in the program's own executable.
   virtual bool IsExeFrame(const std::string& name) const = 0;
+  // How names in `module` (the part of a name before '!') were found.
+  virtual SymbolKind ModuleSymbols(const std::string& module) const {
+    (void)module;
+    return SymbolKind::Unknown;
+  }
 };
 
 inline std::string Lower(std::string s) {

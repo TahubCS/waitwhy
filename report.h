@@ -81,6 +81,24 @@ struct Finding {
   std::string releaserCode;
 };
 
+// How far the report can be trusted (W24).
+struct DataQuality {
+  enum class Level { High, Medium, Low };
+  Level confidence = Level::High;
+  std::vector<std::string> reasons;  // why it is not high
+  uint64_t eventsLost = 0;
+  uint64_t buffersLost = 0;
+  double stackPct = 100;     // share of all wait time with a user-mode call stack
+  double wakerKnownPct = -1;  // share of the time in finished waits whose waker is known; -1: none
+  std::vector<std::string> fullModules, exportModules, unnamedModules;
+  bool modulesKnown = false;  // the symbol status was recorded
+  bool programNamed = true;   // the program's own module has a .pdb (or it is not known)
+};
+
+inline const char* LevelName(DataQuality::Level l) {
+  return l == DataQuality::Level::High ? "high" : l == DataQuality::Level::Medium ? "medium" : "low";
+}
+
 struct Report {
   std::string program;  // file name, or "process"
   uint32_t pid = 0;
@@ -94,6 +112,7 @@ struct Report {
   size_t hiddenWaitRows = 0;   // rows left out by minMs or topN
   double hiddenWaitSeconds = 0;
   std::vector<Finding> findings;
+  DataQuality quality;
   uint64_t contextSwitches = 0;
   uint64_t waitsWithStack = 0;
   uint64_t waitsWithoutStack = 0;
@@ -316,6 +335,54 @@ inline Report BuildReport(const Analyzer& an, SymbolSource& sym, const ReportOpt
   r.waitsWithStack = an.waitsWithStack;
   r.waitsWithoutStack = an.waitsWithoutStack;
   r.kernelOnlyFragments = an.kernelOnlyFragments;
+
+  // Data quality (W24). Rules, from worst: low when there are no stacks, when under half of the
+  // wait time has a stack, when more than 1% of events were lost, or when the program's own
+  // code has no .pdb; medium when under 95% of the wait time has a stack, when any event was
+  // lost, or when the waker of over 10% of the finished wait time is unknown.
+  DataQuality& q = r.quality;
+  q.eventsLost = opt.eventsLost;
+  q.buffersLost = opt.buffersLost;
+  uint64_t waitTicks = 0, stackTicks = 0;
+  std::map<std::string, SymbolKind> modules;
+  for (const auto& [key, b] : an.buckets) {
+    waitTicks += b.ticks;
+    if (!b.stack.empty()) stackTicks += b.ticks;
+    for (uint64_t a : b.stack) {
+      const std::string& n = sym.Name(a);
+      const size_t bang = n.find('!');
+      if (bang == std::string::npos || n.compare(0, bang, "?") == 0) continue;
+      const std::string module = n.substr(0, bang);
+      modules[module] = sym.ModuleSymbols(module);
+      if (sym.IsExeFrame(n) && modules[module] != SymbolKind::Full &&
+          modules[module] != SymbolKind::Unknown)
+        q.programNamed = false;
+    }
+  }
+  q.stackPct = waitTicks ? 100.0 * static_cast<double>(stackTicks) / static_cast<double>(waitTicks) : 100.0;
+  if (an.endedWaitTicks)
+    q.wakerKnownPct = 100.0 * static_cast<double>(an.endedWaitTicks - an.unknownWakerTicks) /
+                      static_cast<double>(an.endedWaitTicks);
+  for (const auto& [module, kind] : modules) {
+    if (kind != SymbolKind::Unknown) q.modulesKnown = true;
+    if (kind == SymbolKind::Full) q.fullModules.push_back(module);
+    if (kind == SymbolKind::ExportsOnly) q.exportModules.push_back(module);
+    if (kind == SymbolKind::None) q.unnamedModules.push_back(module);
+  }
+  const double events = static_cast<double>(an.contextSwitches + opt.eventsLost);
+  const double lostPct = events > 0 ? 100.0 * static_cast<double>(opt.eventsLost) / events : 0.0;
+  auto lower = [&q](DataQuality::Level l, std::string why) {
+    if (static_cast<int>(l) > static_cast<int>(q.confidence)) q.confidence = l;
+    q.reasons.push_back(std::move(why));
+  };
+  if (!opt.stacksOn) lower(DataQuality::Level::Low, "no call stacks");
+  else if (q.stackPct < 50) lower(DataQuality::Level::Low, "most wait time has no call stack");
+  else if (q.stackPct < 95) lower(DataQuality::Level::Medium, "some wait time has no call stack");
+  if (lostPct > 1) lower(DataQuality::Level::Low, "many events lost");
+  else if (opt.eventsLost) lower(DataQuality::Level::Medium, "some events lost");
+  if (!q.programNamed) lower(DataQuality::Level::Low, "no .pdb for the program");
+  if (q.wakerKnownPct >= 0 && q.wakerKnownPct < 90)
+    lower(DataQuality::Level::Medium, "many wakers unknown");
   return r;
 }
 
@@ -425,13 +492,42 @@ inline std::string RenderText(const Report& r) {
   if (r.findings.empty())
     Appendf(out, "  No thread lost a significant share of its time to blocking (sleeps excluded).\n");
 
-  Appendf(out,
-          "\n(%llu context switches seen, %llu waits with a call stack,"
-          " %llu waits without a call stack, %llu kernel-only stack parts)\n",
-          static_cast<unsigned long long>(r.contextSwitches),
-          static_cast<unsigned long long>(r.waitsWithStack),
+  const DataQuality& q = r.quality;
+  Appendf(out, "\nData quality: %s", LevelName(q.confidence));
+  for (size_t i = 0; i < q.reasons.size(); ++i)
+    Appendf(out, "%s%s", i ? ", " : " (", q.reasons[i].c_str());
+  Appendf(out, "%s\n", q.reasons.empty() ? "" : ")");
+  if (q.eventsLost || q.buffersLost)
+    Appendf(out, "  Events lost      : %llu events, %llu buffers\n",
+            static_cast<unsigned long long>(q.eventsLost), static_cast<unsigned long long>(q.buffersLost));
+  else
+    Appendf(out, "  Events lost      : none\n");
+  Appendf(out, "  Call stacks      : %.0f%% of wait time (%llu waits with a call stack, %llu without; %llu kernel-only stack parts)\n",
+          q.stackPct, static_cast<unsigned long long>(r.waitsWithStack),
           static_cast<unsigned long long>(r.waitsWithoutStack),
           static_cast<unsigned long long>(r.kernelOnlyFragments));
+  if (q.wakerKnownPct >= 0)
+    Appendf(out, "  Wakers known     : %.0f%% of the time in waits that ended\n", q.wakerKnownPct);
+  auto join = [](const std::vector<std::string>& names) {
+    std::string text;
+    for (size_t i = 0; i < names.size(); ++i) text += (i ? ", " : "") + names[i];
+    return text;
+  };
+  if (!q.modulesKnown) {
+    Appendf(out, "  Function names   : not recorded\n");
+  } else {
+    std::string names;
+    if (!q.fullModules.empty()) names += "full names in " + join(q.fullModules);
+    if (!q.exportModules.empty())
+      names += (names.empty() ? "" : "; ") + std::string("only exported names in ") + join(q.exportModules);
+    if (!q.unnamedModules.empty())
+      names += (names.empty() ? "" : "; ") + std::string("no names in ") + join(q.unnamedModules);
+    Appendf(out, "  Function names   : %s\n", names.c_str());
+    if (!q.exportModules.empty())
+      Appendf(out, "                     (exported names only: a function that is not exported shows\n"
+                   "                     as the nearest exported one, so those names can be wrong)\n");
+  }
+  Appendf(out, "  Context switches : %llu seen\n", static_cast<unsigned long long>(r.contextSwitches));
   return out;
 }
 

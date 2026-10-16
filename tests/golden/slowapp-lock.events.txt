@@ -68,6 +68,10 @@ SYMBOL addr=0x7ff600006000 name=ntdll!NtWaitForWorkViaWorkerFactory
 SYMBOL addr=0x7ff600006010 name=ntdll!TpCallbackMayRunLong
 SYMBOL addr=0x7ff600006020 name=kernel32!BaseThreadInitThunk
 SYMBOL addr=0x7ff600006030 name=ntdll!RtlUserThreadStart
+MODULE symbols=exports name=KERNELBASE
+MODULE symbols=exports name=kernel32
+MODULE symbols=exports name=ntdll
+MODULE symbols=full name=slowapp
 THREADNAME tid=1 name=Thread 1 (main)
 THREADNAME tid=2 name=Thread 2 (saver)
 THREADNAME tid=3 name=Thread 3 (ticker)

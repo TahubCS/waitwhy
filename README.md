@@ -67,6 +67,18 @@ To print the report again later, on any machine and without Administrator rights
 
 Function names only show up for programs that have `.pdb` symbol files next to them (your own debug or `/Zi` builds). For other programs you will see Windows function names (for example `KERNELBASE!ReadFile`) and addresses.
 
+## How much to trust a report
+
+Every report ends with a "Data quality" section and an overall confidence:
+
+| Confidence | When |
+|---|---|
+| low | No call stacks; under half of the wait time has a call stack; more than 1% of events were lost; or your program has no `.pdb` |
+| medium | Under 95% of the wait time has a call stack; some events were lost; or the thread that woke a wait is unknown for over 10% of the finished wait time |
+| high | None of the above |
+
+It also says which modules had full function names (from a `.pdb`) and which only exported names. Windows' own DLLs usually have only exported names, so a name like `ntdll!RtlSleepConditionVariableSRW` may really be a different function nearby.
+
 ## Report lines scripts can rely on
 
 CI and scripts may match these lines of the text report. They stay as they are until a
