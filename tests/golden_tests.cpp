@@ -35,7 +35,7 @@ std::string ReportFromDump(const std::vector<DumpLine>& lines) {
   Analyzer an;
   DumpReplay replay(an);
   const DumpInfo info = replay.Run(lines);
-  DumpSymbols sym(lines);
+  DumpSymbolsByProcess sym(lines);
   ReportOptions opt;
   opt.ticksPerSecond = info.ticksPerSecond;
   opt.eventsLost = info.eventsLost;
@@ -47,7 +47,7 @@ std::string ReportFromDump(const std::vector<DumpLine>& lines) {
     auto it = info.threadNames.find(tid);
     return it != info.threadNames.end() ? it->second : "Thread " + std::to_string(tid);
   };
-  return RenderText(BuildReport(an, sym, opt, name));
+  return RenderText(BuildReport(an, SymbolsFor(std::ref(sym)), opt, name));
 }
 
 // Prints the first line where the two texts differ.

@@ -25,6 +25,10 @@
 //   FILENAME   fileObject kind name=<path>         the name of a file object the program used
 //   THREADPID  tid pid                             the process of a thread that woke the program
 //   PROCESS    pid name=<file name>                the name of such a process
+//   WATCH      pid                                 another process watched from the start (W33)
+//   CHILD      ts pid parent                       a child process started and is watched (W33)
+//   With several processes, EXE, SYMBOL, SOURCE and MODULE lines carry pid=: addresses
+//   mean different things in different processes.
 //   EXE        name=<file name of the program>
 //   SYMBOL     addr name=<module!function>         every address in the report's stacks
 //   SOURCE     addr file=<source file, lower case>
@@ -131,11 +135,15 @@ struct DumpInfo {
   std::unordered_map<uint32_t, std::string> threadNames;
 };
 
-// Names addresses from a dump's SYMBOL, SOURCE and EXE lines, the way the live run named them.
+// Names addresses from a dump's SYMBOL, SOURCE and EXE lines, the way the live run named them,
+// for one process: lines with another pid= are left out (W33).
 class DumpSymbols : public SymbolSource {
  public:
-  explicit DumpSymbols(const std::vector<DumpLine>& lines) {
+  explicit DumpSymbols(const std::vector<DumpLine>& lines, uint32_t pid = 0) {
     for (const DumpLine& l : lines) {
+      if (pid != 0 && l.Has("pid") && l.Get("pid") != pid &&
+          (l.kind == "SYMBOL" || l.kind == "SOURCE" || l.kind == "EXE" || l.kind == "MODULE"))
+        continue;
       if (l.kind == "SYMBOL" && l.Has("name")) names_[l.Get("addr")] = l.text.at("name");
       if (l.kind == "SOURCE" && l.Has("file")) files_[l.Get("addr")] = l.text.at("file");
       if (l.kind == "EXE" && l.Has("name")) {
@@ -174,6 +182,21 @@ class DumpSymbols : public SymbolSource {
   std::string exeModule_;
 };
 
+// The DumpSymbols of each process in a dump, made when first asked for (W33).
+class DumpSymbolsByProcess {
+ public:
+  explicit DumpSymbolsByProcess(const std::vector<DumpLine>& lines) : lines_(lines) {}
+  SymbolSource& operator()(uint32_t pid) {
+    auto it = byPid_.find(pid);
+    if (it == byPid_.end()) it = byPid_.emplace(pid, DumpSymbols(lines_, pid)).first;
+    return it->second;
+  }
+
+ private:
+  const std::vector<DumpLine>& lines_;
+  std::map<uint32_t, DumpSymbols> byPid_;
+};
+
 // Feeds dump lines to an Analyzer as waitwhy.cpp fed it the kernel events behind them.
 class DumpReplay {
  public:
@@ -200,7 +223,7 @@ class DumpReplay {
         info.namesFromTrace = l.Get("fromTrace", 0) != 0;
       } else if (l.kind == "PDB" && l.Has("file")) {
         info.pdbNextToExe = l.text.at("file");
-      } else if (l.kind == "EXE" && l.Has("name")) {
+      } else if (l.kind == "EXE" && l.Has("name") && (!l.Has("pid") || l.Get("pid") == info.pid)) {
         info.exeFile = l.text.at("name");
       } else if (l.kind == "THREADNAME" && l.Has("name")) {
         info.threadNames[static_cast<uint32_t>(l.Get("tid"))] = l.text.at("name");
@@ -280,6 +303,8 @@ class DumpReplay {
       e.kind = static_cast<ObjectKind>(l.Get("kind"));
       e.path = l.Has("name") ? l.text.at("name") : std::string();
       an_.OnFileIo(e);
+    } else if (l.kind == "WATCH" || l.kind == "CHILD") {
+      an_.otherPids.insert(static_cast<uint32_t>(l.Get("pid")));
     } else if (l.kind == "THREADPID") {
       an_.threadProcess[static_cast<uint32_t>(l.Get("tid"))] = static_cast<uint32_t>(l.Get("pid"));
     } else if (l.kind == "PROCESS") {

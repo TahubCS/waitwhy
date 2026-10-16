@@ -122,6 +122,7 @@ inline const char* LevelName(DataQuality::Level l) {
 struct Report {
   std::string program;  // file name, or "process"
   uint32_t pid = 0;
+  size_t otherProcesses = 0;  // children or other instances watched with it (W33)
   double windowSeconds = 0;
   std::vector<std::string> warnings;
   std::vector<ThreadRow> threads;
@@ -181,9 +182,15 @@ inline uint32_t TopWaker(const WaitGroup& g) {
   return best;
 }
 
-inline Report BuildReport(const Analyzer& an, SymbolSource& sym, const ReportOptions& opt,
+// The symbol source for the threads of one process (W33): addresses mean different things in
+// different processes.
+using SymbolsFor = std::function<SymbolSource&(uint32_t pid)>;
+
+inline Report BuildReport(const Analyzer& an, const SymbolsFor& symbolsFor, const ReportOptions& opt,
                           const ThreadNamer& name) {
+  auto symOf = [&](uint32_t tid) -> SymbolSource& { return symbolsFor(an.ProcessOf(tid)); };
   Report r;
+  r.otherProcesses = an.otherPids.size();
   const double window = an.lastTs > an.firstTs
                             ? static_cast<double>(an.lastTs - an.firstTs) / opt.ticksPerSecond
                             : 0.0;
@@ -239,9 +246,9 @@ inline Report BuildReport(const Analyzer& an, SymbolSource& sym, const ReportOpt
     if (it == byThread.end()) return false;
     uint64_t total = 0, forWork = 0;
     for (const Bucket* b : it->second) {
-      if (YourCodeFrame(*b, sym) != kNotYourCode) return false;
+      if (YourCodeFrame(*b, symOf(b->tid)) != kNotYourCode) return false;
       total += b->ticks;
-      if (IsWaitForWork(*b, sym)) forWork += b->ticks;
+      if (IsWaitForWork(*b, symOf(b->tid))) forWork += b->ticks;
     }
     return total > 0 && forWork * 10 >= total * 9;
   };
@@ -277,7 +284,7 @@ inline Report BuildReport(const Analyzer& an, SymbolSource& sym, const ReportOpt
   // the wait was for that thread (W28).
   auto categoryOf = [&](const Bucket& b) {
     const ObjectKind object = objectKind(b);
-    const Category c = Classify(b, sym, object);
+    const Category c = Classify(b, symOf(b.tid), object);
     if (c == Category::Disk && object == ObjectKind::None && an.WokenByAThread(TopWaker(b), b.tid))
       return Category::OtherThread;
     return c;
@@ -285,7 +292,7 @@ inline Report BuildReport(const Analyzer& an, SymbolSource& sym, const ReportOpt
   for (const auto& [key, b] : an.buckets) {
     if (idle(b.tid)) continue;
     const Category c = categoryOf(b);
-    const std::string code = YourCodeFrame(b, sym);
+    const std::string code = YourCodeFrame(b, symOf(b.tid));
     WaitGroup& g = groupMap[{b.tid, static_cast<int>(c), code}];
     g.tid = b.tid;
     g.category = c;
@@ -297,7 +304,7 @@ inline Report BuildReport(const Analyzer& an, SymbolSource& sym, const ReportOpt
     g.durations.Add(b.durations);
     for (const auto& [waker, t] : b.wakers) g.wakers[waker] += t;
     g.reasons[b.reason] += b.ticks;
-    g.blockedIn[BlockedInFrame(b, sym)] += b.ticks;
+    g.blockedIn[BlockedInFrame(b, symOf(b.tid))] += b.ticks;
     if (const Analyzer::FileName* f = an.FileOf(b.fileObject))
       g.objects[DescribeObject(f->kind == ObjectKind::None ? ObjectKind::Device : f->kind, f->path)] += b.ticks;
   }
@@ -308,7 +315,7 @@ inline Report BuildReport(const Analyzer& an, SymbolSource& sym, const ReportOpt
   for (const auto& [key, b] : an.buckets) {
     if (idle(b.tid)) continue;
     groupOfBucket[key] =
-        &groupMap.at({b.tid, static_cast<int>(categoryOf(b)), YourCodeFrame(b, sym)});
+        &groupMap.at({b.tid, static_cast<int>(categoryOf(b)), YourCodeFrame(b, symOf(b.tid))});
   }
 
   // What thread `waker` did during the waits of `waiter` in `g` that it ended (W25).
@@ -474,6 +481,7 @@ inline Report BuildReport(const Analyzer& an, SymbolSource& sym, const ReportOpt
   for (const auto& [key, b] : an.buckets) {
     waitTicks += b.ticks;
     if (!b.stack.empty()) stackTicks += b.ticks;
+    SymbolSource& sym = symOf(b.tid);
     for (uint64_t a : b.stack) {
       const std::string& n = sym.Name(a);
       const size_t bang = n.find('!');
@@ -516,6 +524,11 @@ inline Report BuildReport(const Analyzer& an, SymbolSource& sym, const ReportOpt
   return r;
 }
 
+inline Report BuildReport(const Analyzer& an, SymbolSource& sym, const ReportOptions& opt,
+                          const ThreadNamer& name) {
+  return BuildReport(an, [&sym](uint32_t) -> SymbolSource& { return sym; }, opt, name);
+}
+
 // printf into a std::string.
 inline void Appendf(std::string& out, const char* format, ...) {
   char buf[1024];
@@ -541,8 +554,12 @@ inline void Appendf(std::string& out, const char* format, ...) {
 inline std::string RenderText(const Report& r) {
   std::string out;
   Appendf(out, "\n==============================================================\n");
-  Appendf(out, " waitwhy report: %s (PID %u), watched for %s\n", r.program.c_str(), r.pid,
-          FormatDuration(r.windowSeconds).c_str());
+  if (r.otherProcesses)
+    Appendf(out, " waitwhy report: %s (PID %u) and %zu more process(es), watched for %s\n",
+            r.program.c_str(), r.pid, r.otherProcesses, FormatDuration(r.windowSeconds).c_str());
+  else
+    Appendf(out, " waitwhy report: %s (PID %u), watched for %s\n", r.program.c_str(), r.pid,
+            FormatDuration(r.windowSeconds).c_str());
   Appendf(out, "==============================================================\n");
   for (const std::string& w : r.warnings) Appendf(out, "Warning: %s\n", w.c_str());
 

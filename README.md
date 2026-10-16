@@ -51,6 +51,13 @@ To watch a program from its very start (slow start-up), let waitwhy start it: ev
 .\waitwhy.exe -- .\slowapp.exe --seconds 6
 ```
 
+A program can be more than one process. `--children` also watches every process the program starts while it is watched, and `--name X --all` watches every running process named X. The report then counts the other processes in its header and marks their threads with `[PID N]`:
+
+```powershell
+.\waitwhy.exe --children -- cmd.exe /c build.bat
+.\waitwhy.exe --name worker.exe --all --seconds 10
+```
+
 `waitwhy --help` lists every option and `waitwhy --version` prints the version. The first word may be a command: `watch` (the default, so it can be left out) or `analyze FILE`. Every error says what to do next.
 
 ```powershell

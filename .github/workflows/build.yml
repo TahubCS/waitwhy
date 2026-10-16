@@ -207,6 +207,7 @@ jobs:
             @{ Mode = 'socket'; Hard = @('\(client\) spent \d+% of the time waiting for the network, in scenarios!.*socket_round_trip') },
             @{ Mode = 'cpu'; Hard = @('spent \d+% of the time ready to run but waiting for a free CPU') },
             @{ Mode = 'child'; Hard = @('\(main\) spent \d+% of the time waiting for another thread or an event to signal it, in scenarios!.*wait_for_child') },
+            @{ Mode = 'child'; Args = @('--children'); Hard = @('and \d+ more process\(es\), watched for', '\[PID \d+\]') },
             @{ Mode = 'lockcpu'; Hard = @('So it holds the lock while it is running') },
             @{ Mode = 'locksleep'; Hard = @('So it holds the lock while it is sleeping on purpose') },
             @{ Mode = 'lockdisk'; Hard = @('So it holds the lock while it is waiting for the disk') },

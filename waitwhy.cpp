@@ -49,6 +49,8 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <tuple>
@@ -101,6 +103,8 @@ const GUID kStackWalkGuid = {
     0xdef2fe46, 0x7bd6, 0x4b80, {0xbd, 0x94, 0xf5, 0x7f, 0xe2, 0x0d, 0x0c, 0xe3}};
 const GUID kImageGuid = {
     0x2cb15d1d, 0x5fc1, 0x11d2, {0xab, 0xe1, 0x00, 0xa0, 0xc9, 0x11, 0xf5, 0x18}};
+const GUID kProcessGuid = {
+    0x3d6fa8d0, 0xfe05, 0x11d0, {0x9d, 0xda, 0x00, 0xc0, 0x4f, 0xd7, 0xba, 0x7c}};
 const GUID kFileIoGuid = {
     0x90cbdc39, 0x4a3e, 0x11d1, {0x84, 0xf4, 0x00, 0x00, 0xf8, 0x04, 0x64, 0xe3}};
 
@@ -111,6 +115,7 @@ constexpr UCHAR kOpThreadDcStart = 3;  // "already running when the trace starte
 constexpr UCHAR kOpCSwitch = 36;
 constexpr UCHAR kOpReadyThread = 50;
 constexpr UCHAR kOpStackWalk = 32;     // inside the StackWalk class
+constexpr UCHAR kOpProcessStart = 1;   // inside the Process class (W33)
 constexpr UCHAR kOpImageDcStart = 3;   // inside the Image class: loaded when the trace started
 constexpr UCHAR kOpImageLoad = 10;     // inside the Image class: loaded during the trace
 // Inside the FileIo class (W28): names of file objects, and the requests on them.
@@ -264,7 +269,7 @@ void OnThreadEvent(const EVENT_RECORD* ev, ThreadEvent::Kind kind) {
   e.kind = kind;
   std::memcpy(&e.pid, ev->UserData, sizeof e.pid);
   std::memcpy(&e.tid, static_cast<const uint8_t*>(ev->UserData) + 4, sizeof e.tid);
-  if (g_dump && e.pid == g_analysis.pid) {
+  if (g_dump && g_analysis.IsWatched(e.pid)) {
     std::fprintf(g_dump, "THREAD ts=%llu kind=%d pid=%u tid=%u\n",
                  static_cast<unsigned long long>(e.ts), static_cast<int>(kind), e.pid, e.tid);
     ++g_dumpLines;
@@ -317,7 +322,7 @@ struct ImageInfo {
   uint64_t size = 0;
   std::wstring path;  // as the kernel names it, e.g. \Device\HarddiskVolume3\...\ntdll.dll
 };
-std::vector<ImageInfo> g_images;
+std::map<uint32_t, std::vector<ImageInfo>> g_images;  // by process
 
 void OnImage(const EVENT_RECORD* ev) {
   // Image_Load (versions 2 and 3): ImageBase, ImageSize (pointers), ProcessId, ImageCheckSum,
@@ -329,7 +334,7 @@ void OnImage(const EVENT_RECORD* ev) {
   const auto* p = static_cast<const uint8_t*>(ev->UserData);
   uint32_t pid = 0;
   std::memcpy(&pid, p + 2 * ptr, sizeof pid);
-  if (pid != g_analysis.pid) return;
+  if (!g_analysis.IsWatched(pid)) return;
   ImageInfo image;
   std::memcpy(&image.base, p, ptr);
   std::memcpy(&image.size, p + ptr, ptr);
@@ -346,34 +351,47 @@ void OnImage(const EVENT_RECORD* ev) {
                  static_cast<unsigned long long>(image.size), Narrow(image.path).c_str());
     ++g_dumpLines;
   }
-  g_images.push_back(std::move(image));
+  g_images[pid].push_back(std::move(image));
 }
 
-// Where the fields W28 needs sit in one kind of FileIo event, found once through TDH by their
-// names, because the layouts differ between event versions. -1: the event has no such field.
-struct FileIoLayout {
+// --children (W33, D9): processes the program starts are watched too. The event thread adds
+// them; the main thread reads the list under this lock (for thread names while watching).
+bool g_followChildren = false;
+std::mutex g_childrenLock;
+std::vector<uint32_t> g_children;
+
+// Where the fields of one kind of kernel event sit, found through TDH by their names, because
+// the layouts differ between event versions (W28, W33). Fields after the first string have no
+// fixed place and are left out; a string's size is 0.
+struct EventFields {
   bool ok = false;
-  int irp = -1, fileObject = -1, ttid = -1, name = -1;
-  size_t ttidSize = 4;
+  std::map<std::wstring, std::pair<int, size_t>> at;  // name -> offset, size
+  int Offset(const wchar_t* name) const {
+    auto it = at.find(name);
+    return it == at.end() ? -1 : it->second.first;
+  }
+  size_t Size(const wchar_t* name) const {
+    auto it = at.find(name);
+    return it == at.end() ? 0 : it->second.second;
+  }
 };
 
-FileIoLayout FindFileIoLayout(PEVENT_RECORD ev) {
+EventFields FindEventFields(PEVENT_RECORD ev) {
   // TDH_IN_TYPE values (tdh.h); not every SDK header names them.
   enum : USHORT { kInUnicodeString = 1, kInInt8 = 3, kInUInt8 = 4, kInInt16 = 5, kInUInt16 = 6,
                   kInInt32 = 7, kInUInt32 = 8, kInInt64 = 9, kInUInt64 = 10, kInBoolean = 13,
                   kInPointer = 16, kInFiletime = 17, kInHexInt32 = 20, kInHexInt64 = 21 };
-  FileIoLayout layout;
+  EventFields fields;
   ULONG size = 0;
-  if (TdhGetEventInformation(ev, 0, nullptr, nullptr, &size) != ERROR_INSUFFICIENT_BUFFER) return layout;
+  if (TdhGetEventInformation(ev, 0, nullptr, nullptr, &size) != ERROR_INSUFFICIENT_BUFFER) return fields;
   std::vector<unsigned char> buffer(size);
   auto* info = reinterpret_cast<TRACE_EVENT_INFO*>(buffer.data());
-  if (TdhGetEventInformation(ev, 0, nullptr, info, &size) != ERROR_SUCCESS) return layout;
+  if (TdhGetEventInformation(ev, 0, nullptr, info, &size) != ERROR_SUCCESS) return fields;
   const size_t ptr = (ev->EventHeader.Flags & EVENT_HEADER_FLAG_64_BIT_HEADER) ? 8 : 4;
   size_t offset = 0;
   for (ULONG i = 0; i < info->TopLevelPropertyCount; ++i) {
     const EVENT_PROPERTY_INFO& p = info->EventPropertyInfoArray[i];
     if ((p.Flags & (PropertyStruct | PropertyParamLength | PropertyParamCount)) || p.count > 1) break;
-    const auto* name = reinterpret_cast<const wchar_t*>(buffer.data() + p.NameOffset);
     size_t fieldSize = 0;
     switch (p.nonStructType.InType) {
       case kInInt8: case kInUInt8: fieldSize = 1; break;
@@ -384,18 +402,32 @@ FileIoLayout FindFileIoLayout(PEVENT_RECORD ev) {
       case kInUnicodeString: fieldSize = 0; break;  // runs to its terminating null
       default: i = info->TopLevelPropertyCount; continue;  // anything else: stop here
     }
-    const int at = static_cast<int>(offset);
-    if (wcscmp(name, L"IrpPtr") == 0) layout.irp = at;
-    else if (wcscmp(name, L"FileObject") == 0) layout.fileObject = at;
-    else if (wcscmp(name, L"TTID") == 0) layout.ttid = at, layout.ttidSize = fieldSize;
-    else if (p.nonStructType.InType == kInUnicodeString &&
-             (wcscmp(name, L"FileName") == 0 || wcscmp(name, L"OpenPath") == 0)) layout.name = at;
+    fields.at[reinterpret_cast<const wchar_t*>(buffer.data() + p.NameOffset)] = {static_cast<int>(offset), fieldSize};
     if (fieldSize == 0) break;  // nothing after a string has a fixed place
     offset += fieldSize;
   }
-  layout.ok = true;
-  return layout;
+  fields.ok = true;
+  return fields;
 }
+
+const EventFields& EventFieldsOf(PEVENT_RECORD ev) {
+  static std::map<std::tuple<uint64_t, uint64_t, UCHAR, UCHAR, bool>, EventFields> cache;
+  uint64_t guid[2];
+  std::memcpy(guid, &ev->EventHeader.ProviderId, sizeof guid);
+  const auto key = std::make_tuple(guid[0], guid[1], ev->EventHeader.EventDescriptor.Opcode,
+                                   ev->EventHeader.EventDescriptor.Version,
+                                   (ev->EventHeader.Flags & EVENT_HEADER_FLAG_64_BIT_HEADER) != 0);
+  auto it = cache.find(key);
+  if (it == cache.end()) it = cache.emplace(key, FindEventFields(ev)).first;
+  return it->second;
+}
+
+// Where the fields W28 needs sit in one kind of FileIo event. -1: the event has no such field.
+struct FileIoLayout {
+  bool ok = false;
+  int irp = -1, fileObject = -1, ttid = -1, name = -1;
+  size_t ttidSize = 4;
+};
 
 const FileIoLayout& FileIoLayoutOf(PEVENT_RECORD ev) {
   static std::map<std::tuple<UCHAR, UCHAR, bool>, FileIoLayout> layouts;
@@ -403,8 +435,17 @@ const FileIoLayout& FileIoLayoutOf(PEVENT_RECORD ev) {
                                    ev->EventHeader.EventDescriptor.Version,
                                    (ev->EventHeader.Flags & EVENT_HEADER_FLAG_64_BIT_HEADER) != 0);
   auto it = layouts.find(key);
-  if (it == layouts.end()) it = layouts.emplace(key, FindFileIoLayout(ev)).first;
-  return it->second;
+  if (it != layouts.end()) return it->second;
+  const EventFields& f = EventFieldsOf(ev);
+  FileIoLayout layout;
+  layout.ok = f.ok;
+  layout.irp = f.Offset(L"IrpPtr");
+  layout.fileObject = f.Offset(L"FileObject");
+  layout.ttid = f.Offset(L"TTID");
+  layout.ttidSize = f.Size(L"TTID");
+  for (const wchar_t* name : {L"FileName", L"OpenPath"})
+    if (f.Offset(name) >= 0 && f.Size(name) == 0) layout.name = f.Offset(name);
+  return layouts.emplace(key, layout).first->second;
 }
 
 void DumpFileName(uint64_t fileObject, const Analyzer::FileName& f) {
@@ -492,6 +533,30 @@ void OnFileIo(PEVENT_RECORD ev, UCHAR op) {
   }
 }
 
+void OnProcessStart(PEVENT_RECORD ev) {
+  if (!g_followChildren) return;
+  const auto ts = static_cast<uint64_t>(ev->EventHeader.TimeStamp.QuadPart);
+  if (PastWindow(ts)) return;
+  const EventFields& f = EventFieldsOf(ev);
+  const int childAt = f.Offset(L"ProcessId"), parentAt = f.Offset(L"ParentId");
+  if (!f.ok || childAt < 0 || parentAt < 0 ||
+      static_cast<size_t>((std::max)(childAt, parentAt)) + 4 > ev->UserDataLength)
+    return;
+  uint32_t child = 0, parent = 0;
+  std::memcpy(&child, static_cast<const uint8_t*>(ev->UserData) + childAt, sizeof child);
+  std::memcpy(&parent, static_cast<const uint8_t*>(ev->UserData) + parentAt, sizeof parent);
+  if (!g_analysis.IsWatched(parent) || g_analysis.IsWatched(child)) return;
+  g_analysis.otherPids.insert(child);
+  {
+    std::lock_guard<std::mutex> lock(g_childrenLock);
+    g_children.push_back(child);
+  }
+  if (g_dump) {
+    std::fprintf(g_dump, "CHILD ts=%llu pid=%u parent=%u\n", static_cast<unsigned long long>(ts), child, parent);
+    ++g_dumpLines;
+  }
+}
+
 void WINAPI OnEvent(PEVENT_RECORD ev) {
   const EVENT_HEADER& h = ev->EventHeader;
   const UCHAR op = h.EventDescriptor.Opcode;
@@ -513,6 +578,8 @@ void WINAPI OnEvent(PEVENT_RECORD ev) {
     OnImage(ev);
   } else if (IsEqualGUID(h.ProviderId, kFileIoGuid)) {
     OnFileIo(ev, op);
+  } else if (IsEqualGUID(h.ProviderId, kProcessGuid) && op == kOpProcessStart) {
+    OnProcessStart(ev);
   }
 }
 
@@ -534,7 +601,8 @@ void FillProps(SessionProps& sp, bool forStart, bool privateSession = false) {
   sp.props.Wnode.Flags = WNODE_FLAG_TRACED_GUID;
   sp.props.EnableFlags =
       EVENT_TRACE_FLAG_CSWITCH | EVENT_TRACE_FLAG_DISPATCHER | EVENT_TRACE_FLAG_THREAD |
-      EVENT_TRACE_FLAG_IMAGE_LOAD | EVENT_TRACE_FLAG_DISK_IO | EVENT_TRACE_FLAG_DISK_FILE_IO |
+      EVENT_TRACE_FLAG_PROCESS | EVENT_TRACE_FLAG_IMAGE_LOAD | EVENT_TRACE_FLAG_DISK_IO |
+      EVENT_TRACE_FLAG_DISK_FILE_IO |
       EVENT_TRACE_FLAG_FILE_IO | EVENT_TRACE_FLAG_FILE_IO_INIT;
   sp.props.LogFileMode = EVENT_TRACE_REAL_TIME_MODE;
   // A system-logger session (Windows 8 and later) gets the kernel's events under a name of its
@@ -640,22 +708,24 @@ BOOL WINAPI OnCtrl(DWORD) {
 // Process, thread and symbol helpers
 // ---------------------------------------------------------------------------
 
-bool FindProcessByName(const std::wstring& name, uint32_t* pid) {
+std::vector<uint32_t> FindProcessesByName(const std::wstring& name) {
+  std::vector<uint32_t> pids;
   HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-  if (snap == INVALID_HANDLE_VALUE) return false;
+  if (snap == INVALID_HANDLE_VALUE) return pids;
   PROCESSENTRY32W pe{};
   pe.dwSize = sizeof pe;
-  int matches = 0;
-  for (BOOL ok = Process32FirstW(snap, &pe); ok; ok = Process32NextW(snap, &pe)) {
-    if (_wcsicmp(pe.szExeFile, name.c_str()) == 0) {
-      if (matches++ == 0) *pid = pe.th32ProcessID;
-    }
-  }
+  for (BOOL ok = Process32FirstW(snap, &pe); ok; ok = Process32NextW(snap, &pe))
+    if (_wcsicmp(pe.szExeFile, name.c_str()) == 0) pids.push_back(pe.th32ProcessID);
   CloseHandle(snap);
-  if (matches > 1)
-    std::printf("Note: %d processes are named %s; watching PID %u. Use --pid to choose.\n",
-                matches, Narrow(name).c_str(), *pid);
-  return matches > 0;
+  return pids;
+}
+
+// The program's process and the others watched with it (W33).
+std::vector<uint32_t> WatchedProcesses() {
+  std::vector<uint32_t> pids{g_analysis.pid};
+  for (uint32_t p : g_analysis.otherPids) pids.push_back(p);
+  std::sort(pids.begin() + 1, pids.end());
+  return pids;
 }
 
 void SnapshotThreads(uint32_t pid) {
@@ -757,26 +827,28 @@ bool SnapshotStack(HANDLE proc, uint32_t tid, std::vector<uint64_t>* frames) {
 // Threads still blocked when the trace ends, or blocked for the whole window, get one stack
 // snapshot each (W7); the analysis decides which ones need it.
 void SnapshotThreadsStillBlocked() {
-  HANDLE proc = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, g_analysis.pid);
-  if (!proc) return;
-  SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_FAIL_CRITICAL_ERRORS);
-  if (!SymInitializeW(proc, nullptr, TRUE)) {
-    CloseHandle(proc);
-    return;
-  }
-  for (uint32_t tid : g_analysis.targetThreads) {
-    if (!g_analysis.NeedsSnapshot(tid)) continue;
-    std::vector<uint64_t> frames;
-    if (!SnapshotStack(proc, tid, &frames)) continue;  // gone; leave it as never seen
-    if (g_dump) {
-      std::fprintf(g_dump, "SNAPSHOT tid=%u", tid);
-      WriteFrames(g_dump, frames);
-      std::fputc('\n', g_dump);
+  for (uint32_t process : WatchedProcesses()) {
+    HANDLE proc = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, process);
+    if (!proc) continue;
+    SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_FAIL_CRITICAL_ERRORS);
+    if (!SymInitializeW(proc, nullptr, TRUE)) {
+      CloseHandle(proc);
+      continue;
     }
-    g_analysis.ApplySnapshot(tid, std::move(frames));
+    for (uint32_t tid : g_analysis.targetThreads) {
+      if (g_analysis.ProcessOf(tid) != process || !g_analysis.NeedsSnapshot(tid)) continue;
+      std::vector<uint64_t> frames;
+      if (!SnapshotStack(proc, tid, &frames)) continue;  // gone; leave it as never seen
+      if (g_dump) {
+        std::fprintf(g_dump, "SNAPSHOT tid=%u", tid);
+        WriteFrames(g_dump, frames);
+        std::fputc('\n', g_dump);
+      }
+      g_analysis.ApplySnapshot(tid, std::move(frames));
+    }
+    SymCleanup(proc);
+    CloseHandle(proc);
   }
-  SymCleanup(proc);
-  CloseHandle(proc);
 }
 
 // --symbols: "ms" for Microsoft's public symbol server, or a DbgHelp symbol path (W27).
@@ -823,9 +895,10 @@ class Symbolizer : public SymbolSource {
  public:
   // When the program has exited: load the modules it had loaded, at the addresses they had,
   // from the kernel's image events (W26).
-  bool InitFromImages(const std::vector<ImageInfo>& images) {
+  bool InitFromImages(const std::vector<ImageInfo>& images, uint32_t pid) {
     if (images.empty()) return false;
-    proc_ = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(0x57a17));  // any unique value
+    // Any value unique to this process's session; DbgHelp only uses it as a key.
+    proc_ = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(0x57a170000ull + pid));
     ownsHandle_ = false;
     SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_FAIL_CRITICAL_ERRORS |
                   SYMOPT_LOAD_LINES);
@@ -852,6 +925,7 @@ class Symbolizer : public SymbolSource {
     return true;
   }
   bool FromImages() const { return fromImages_; }
+  bool Ok() const { return ok_; }
   const std::wstring& SearchPath() const { return searchPath_; }
 
   bool Init(uint32_t pid) {
@@ -1009,28 +1083,39 @@ void NameWakerProcesses() {
 
 // Ends a dump with every name the report uses (W18), so the report can be rebuilt from the
 // dump alone: the program's file, each address in a wait's stack, and the thread labels.
-void WriteDumpNames(FILE* out, Symbolizer& sym, bool symbolsOk) {
+using SymbolizerFor = std::function<Symbolizer&(uint32_t pid)>;
+
+void WriteDumpNames(FILE* out, const SymbolizerFor& symbolsFor, bool symbolsOk, const ThreadNamer& namer) {
   const Analyzer& an = g_analysis;
-  std::fprintf(out, "NAMES symbolsOk=%d fromTrace=%d\n", symbolsOk ? 1 : 0, sym.FromImages() ? 1 : 0);
-  const std::string pdb = sym.PdbNextToExe();
+  Symbolizer& primary = symbolsFor(an.pid);
+  std::fprintf(out, "NAMES symbolsOk=%d fromTrace=%d\n", symbolsOk ? 1 : 0, primary.FromImages() ? 1 : 0);
+  const std::string pdb = primary.PdbNextToExe();
   if (!pdb.empty()) std::fprintf(out, "PDB file=%s\n", pdb.c_str());
-  if (!sym.ExeFile().empty()) std::fprintf(out, "EXE name=%s\n", sym.ExeFile().c_str());
-  std::map<uint64_t, bool> addrs;  // sorted, so dumps of the same run compare equal
-  for (const auto& [key, b] : an.buckets)
-    for (uint64_t a : b.stack) addrs[a] = true;
-  for (const auto& [addr, unused] : addrs) {
-    (void)unused;
-    std::fprintf(out, "SYMBOL addr=0x%llx name=%s\n", static_cast<unsigned long long>(addr),
-                 sym.Name(addr).c_str());
-    const std::string& file = sym.SourceFile(addr);
-    if (!file.empty())
-      std::fprintf(out, "SOURCE addr=0x%llx file=%s\n", static_cast<unsigned long long>(addr),
-                   file.c_str());
+  // With several processes every name says whose it is (W33).
+  const bool several = !an.otherPids.empty();
+  for (uint32_t process : WatchedProcesses()) {
+    Symbolizer& sym = symbolsFor(process);
+    char tag[32] = "";
+    if (several) std::snprintf(tag, sizeof tag, "pid=%u ", process);
+    if (!sym.ExeFile().empty()) std::fprintf(out, "EXE %sname=%s\n", tag, sym.ExeFile().c_str());
+    std::map<uint64_t, bool> addrs;  // sorted, so dumps of the same run compare equal
+    for (const auto& [key, b] : an.buckets)
+      if (an.ProcessOf(b.tid) == process)
+        for (uint64_t a : b.stack) addrs[a] = true;
+    for (const auto& [addr, unused] : addrs) {
+      (void)unused;
+      std::fprintf(out, "SYMBOL %saddr=0x%llx name=%s\n", tag, static_cast<unsigned long long>(addr),
+                   sym.Name(addr).c_str());
+      const std::string& file = sym.SourceFile(addr);
+      if (!file.empty())
+        std::fprintf(out, "SOURCE %saddr=0x%llx file=%s\n", tag, static_cast<unsigned long long>(addr),
+                     file.c_str());
+    }
+    for (const auto& [module, kind] : sym.ModuleKinds())
+      std::fprintf(out, "MODULE %ssymbols=%s name=%s\n", tag,
+                   kind == SymbolKind::Full ? "full" : kind == SymbolKind::ExportsOnly ? "exports" : "none",
+                   module.c_str());
   }
-  for (const auto& [module, kind] : sym.ModuleKinds())
-    std::fprintf(out, "MODULE symbols=%s name=%s\n",
-                 kind == SymbolKind::Full ? "full" : kind == SymbolKind::ExportsOnly ? "exports" : "none",
-                 module.c_str());
   std::map<uint32_t, uint32_t> wakerProcess;  // sorted, like the rest
   for (const auto& [key, b] : an.buckets)
     for (const auto& [waker, ticks] : b.wakers) {
@@ -1054,7 +1139,7 @@ void WriteDumpNames(FILE* out, Symbolizer& sym, bool symbolsOk) {
   for (uint32_t tid : an.exitedThreads) tids[tid] = true;
   for (const auto& [tid, unused] : tids) {
     (void)unused;
-    std::fprintf(out, "THREADNAME tid=%u name=%s\n", tid, ThreadLabel(tid).c_str());
+    std::fprintf(out, "THREADNAME tid=%u name=%s\n", tid, namer(tid).c_str());
   }
 }
 
@@ -1062,8 +1147,17 @@ void WriteDumpNames(FILE* out, Symbolizer& sym, bool symbolsOk) {
 // Report
 // ---------------------------------------------------------------------------
 
+// Thread labels; with several processes, threads of the others say which process (W33).
+std::string ProgramThreadLabel(uint32_t tid) {
+  std::string label = ThreadLabel(tid);
+  const uint32_t process = g_analysis.ProcessOf(tid);
+  if (!g_analysis.otherPids.empty() && process != g_analysis.pid) label += " [PID " + std::to_string(process) + "]";
+  return label;
+}
+
 void PrintReport(double ticksPerSecond, ReportOptions opt, const SessionProps& stopped,
-                 bool stacksOn, Symbolizer& sym, bool symbolsOk) {
+                 bool stacksOn, const SymbolizerFor& symbolsFor, bool symbolsOk) {
+  Symbolizer& sym = symbolsFor(g_analysis.pid);
   opt.ticksPerSecond = ticksPerSecond;
   opt.eventsLost = stopped.props.EventsLost;
   opt.buffersLost = stopped.props.RealTimeBuffersLost;
@@ -1072,7 +1166,9 @@ void PrintReport(double ticksPerSecond, ReportOptions opt, const SessionProps& s
   opt.exeFile = sym.ExeFile();
   opt.namesFromTrace = sym.FromImages();
   opt.pdbNextToExe = sym.PdbNextToExe();
-  const Report report = BuildReport(g_analysis, sym, opt, ThreadLabel);
+  const Report report = BuildReport(
+      g_analysis, SymbolsFor([&symbolsFor](uint32_t pid) -> SymbolSource& { return symbolsFor(pid); }),
+      opt, ProgramThreadLabel);
   std::fputs(RenderText(report).c_str(), stdout);
 }
 
@@ -1091,7 +1187,7 @@ int ReportFromDump(const std::wstring& path, ReportOptions opt) {
   if (info.version < 2)
     std::printf("Note: %s is a version 1 dump, which holds no function or thread names.\n",
                 Narrow(path).c_str());
-  DumpSymbols sym(lines);
+  DumpSymbolsByProcess sym(lines);
   opt.ticksPerSecond = info.ticksPerSecond > 0 ? info.ticksPerSecond : 1e7;
   opt.eventsLost = info.eventsLost;
   opt.buffersLost = info.buffersLost;
@@ -1105,7 +1201,7 @@ int ReportFromDump(const std::wstring& path, ReportOptions opt) {
     return it != info.threadNames.end() ? it->second : "Thread " + std::to_string(tid);
   };
   std::printf("Report rebuilt from %s.\n", Narrow(path).c_str());
-  std::fputs(RenderText(BuildReport(an, sym, opt, name)).c_str(), stdout);
+  std::fputs(RenderText(BuildReport(an, SymbolsFor(std::ref(sym)), opt, name)).c_str(), stdout);
   return kExitOk;
 }
 
@@ -1116,7 +1212,7 @@ void Usage() {
       "waitwhy %s - what is a program waiting for when it is slow but the CPU is idle?\n"
       "\n"
       "Usage:\n"
-      "  waitwhy [watch] (--pid N | --name program.exe) [options]\n"
+      "  waitwhy [watch] (--pid N | --name program.exe [--all]) [options]\n"
       "      Watch a running program, then report what its threads were waiting on.\n"
       "      Needs an Administrator shell.\n"
       "  waitwhy [watch] [options] -- program.exe [its arguments]\n"
@@ -1129,6 +1225,8 @@ void Usage() {
       "\n"
       "Watch options:\n"
       "  --seconds N          how long to watch (default 10)\n"
+      "  --children           also watch the processes the program starts\n"
+      "  --all                with --name: watch every process of that name\n"
       "  --dump-events FILE   also write every event of the program to FILE, and the names\n"
       "                       the report uses; attach it to bug reports\n"
       "  --symbols ms|PATH    ms: download Windows' own symbols from Microsoft (cached in\n"
@@ -1183,6 +1281,7 @@ int wmain(int argc, wchar_t** argv) {
   std::wstring fromDump;
   int seconds = 10;
   bool secondsGiven = false;
+  bool allInstances = false;  // --all (W33)
   std::vector<std::wstring> launch;  // W32: the program to start, after "--"
   ReportOptions shown;  // what the report shows: --top, --min-ms, --stall-ms
   // Command line v1 (W30): an optional command first; without one it means watch.
@@ -1224,6 +1323,14 @@ int wmain(int argc, wchar_t** argv) {
       if (a == L"--help" || a == L"-h") {
         Usage();
         return kExitOk;
+      }
+      if (a == L"--children") {
+        g_followChildren = true;
+        continue;
+      }
+      if (a == L"--all") {
+        allInstances = true;
+        continue;
       }
       return UsageError("Unknown option '" + Narrow(a) + "'.");
     }
@@ -1268,11 +1375,23 @@ int wmain(int argc, wchar_t** argv) {
   if (pid == 0 && name.empty() && launch.empty())
     return UsageError("Which program? Give its process ID with --pid N, its file name with --name,\n"
                       "or start it with: waitwhy [options] -- program.exe [its arguments]");
-  if (!name.empty() && !FindProcessByName(name, &pid)) {
-    std::printf("No running process is named %s. Check the name on the Details tab of Task Manager,\n"
-                "or give the process ID with --pid.\n",
-                Narrow(name).c_str());
-    return kExitUsage;
+  if (allInstances && name.empty()) return UsageError("--all needs --name: it watches every process of that name.");
+  if (!name.empty()) {
+    const std::vector<uint32_t> found = FindProcessesByName(name);
+    if (found.empty()) {
+      std::printf("No running process is named %s. Check the name on the Details tab of Task Manager,\n"
+                  "or give the process ID with --pid.\n",
+                  Narrow(name).c_str());
+      return kExitUsage;
+    }
+    pid = found[0];
+    if (allInstances) {
+      g_analysis.otherPids.insert(found.begin() + 1, found.end());
+    } else if (found.size() > 1) {
+      std::printf("Note: %zu processes are named %s; watching PID %u. Use --all to watch them all,\n"
+                  "      or --pid to choose one.\n",
+                  found.size(), Narrow(name).c_str(), pid);
+    }
   }
   // Launch mode (W32, D9): the program is created suspended and only resumed once the trace is
   // running, so its start-up is watched too. Without --seconds it is watched until it exits.
@@ -1310,7 +1429,17 @@ int wmain(int argc, wchar_t** argv) {
       std::printf("No process with ID %u is running. Check the ID on the Details tab of Task Manager.\n", pid);
     return kExitUsage;
   }
-  SnapshotThreads(pid);
+  for (uint32_t process : WatchedProcesses()) SnapshotThreads(process);
+  // The processes --all gave, for thread names; children come from the event thread (W33).
+  const std::vector<uint32_t> watchedAtStart = WatchedProcesses();
+  auto rememberThreadNames = [&watchedAtStart] {
+    std::vector<uint32_t> pids = watchedAtStart;
+    {
+      std::lock_guard<std::mutex> lock(g_childrenLock);
+      pids.insert(pids.end(), g_children.begin(), g_children.end());
+    }
+    for (uint32_t process : pids) RememberThreadNames(process);
+  };
 
   LARGE_INTEGER freq;
   QueryPerformanceFrequency(&freq);
@@ -1331,6 +1460,7 @@ int wmain(int argc, wchar_t** argv) {
                  "# then what the report needs: the stop, snapshots, symbols and thread names.\n"
                  "DUMP version=2 pid=%u ticksPerSecond=%lld\n",
                  pid, static_cast<long long>(freq.QuadPart));
+    for (uint32_t other : g_analysis.otherPids) std::fprintf(g_dump, "WATCH pid=%u\n", other);
     for (uint32_t tid : g_analysis.targetThreads) std::fprintf(g_dump, "TARGET tid=%u\n", tid);
   }
 
@@ -1401,7 +1531,7 @@ int wmain(int argc, wchar_t** argv) {
       std::printf(".");
       std::fflush(stdout);
       nextDot += static_cast<uint64_t>(freq.QuadPart);
-      RememberThreadNames(pid);
+      rememberThreadNames();
     }
     const uint64_t untilMs = (std::min)(deadline, nextDot) - t;
     const auto waitMs = static_cast<DWORD>((std::min)(
@@ -1416,7 +1546,7 @@ int wmain(int argc, wchar_t** argv) {
 
   LARGE_INTEGER windowEnd;
   QueryPerformanceCounter(&windowEnd);
-  if (!programExited) RememberThreadNames(pid);
+  rememberThreadNames();
   g_windowEnd.store(static_cast<uint64_t>(windowEnd.QuadPart), std::memory_order_relaxed);
   SessionProps stopped;
   StopKernelSession(&stopped);  // ProcessTrace returns once the buffers are drained
@@ -1437,17 +1567,29 @@ int wmain(int argc, wchar_t** argv) {
   g_analysis.FlushAtEnd();
   // A program that exited can no longer be asked for its modules; the trace recorded them.
   NameWakerProcesses();
-  Symbolizer sym;
-  const bool symbolsOk = (!programExited && sym.Init(pid)) || sym.InitFromImages(g_images);
+  // One DbgHelp session per watched process (W33); a process that has exited is named from
+  // the modules the trace recorded for it (W26).
+  std::map<uint32_t, std::unique_ptr<Symbolizer>> symbolizers;
+  auto symbolsFor = [&](uint32_t process) -> Symbolizer& {
+    auto it = symbolizers.find(process);
+    if (it != symbolizers.end()) return *it->second;
+    auto sym = std::make_unique<Symbolizer>();
+    const bool exited = process == pid && programExited;
+    if (exited || !sym->Init(process)) sym->InitFromImages(g_images[process], process);
+    return *symbolizers.emplace(process, std::move(sym)).first->second;
+  };
+  Symbolizer& sym = symbolsFor(pid);
+  const bool symbolsOk = sym.Ok();
+  for (uint32_t process : WatchedProcesses()) symbolsFor(process);
   std::fputs(SymbolServerNote(sym.SearchPath()).c_str(), stdout);
   if (g_dump) {
-    WriteDumpNames(g_dump, sym, symbolsOk);
+    WriteDumpNames(g_dump, symbolsFor, symbolsOk, ProgramThreadLabel);
     std::fclose(g_dump);
     g_dump = nullptr;
     std::printf("Wrote %llu events to %s.\n", static_cast<unsigned long long>(g_dumpLines),
                 Narrow(dumpPath).c_str());
   }
-  PrintReport(static_cast<double>(freq.QuadPart), shown, stopped, stacksOn, sym, symbolsOk);
+  PrintReport(static_cast<double>(freq.QuadPart), shown, stopped, stacksOn, symbolsFor, symbolsOk);
   return kExitOk;
 }
 #endif  // WAITWHY_NO_MAIN

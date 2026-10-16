@@ -306,6 +306,15 @@ class Analyzer {
   std::unordered_map<uint32_t, std::string> processNames;
   static constexpr uint32_t kSystemProcess = 4;
 
+  // Other processes watched with `pid` (W33): its children, or other instances of its name.
+  std::unordered_set<uint32_t> otherPids;
+  bool IsWatched(uint32_t process) const { return process == pid || otherPids.count(process) != 0; }
+  // The process of one of the program's threads; `pid` when not known.
+  uint32_t ProcessOf(uint32_t tid) const {
+    auto it = threadProcess.find(tid);
+    return it != threadProcess.end() ? it->second : pid;
+  }
+
   bool IsTarget(uint32_t tid) const { return targetThreads.count(tid) != 0; }
   bool IsProgramThread(uint32_t tid) const {
     return targetThreads.count(tid) != 0 || exitedThreads.count(tid) != 0;
@@ -393,7 +402,7 @@ class Analyzer {
 
   void OnThread(const ThreadEvent& e) {
     if (e.kind != ThreadEvent::Kind::Ended) threadProcess[e.tid] = e.pid;
-    if (e.pid != pid) return;
+    if (!IsWatched(e.pid)) return;
     if (e.kind == ThreadEvent::Kind::Ended) {
       OnThreadEnd(e);
       return;
