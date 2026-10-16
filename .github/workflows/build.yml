@@ -105,6 +105,11 @@ jobs:
             return $text
           }
 
+          # W31: another tool's "NT Kernel Logger" session must survive waitwhy's runs.
+          logman start "NT Kernel Logger" -p "Windows Kernel Trace" "(process,thread)" -o other-tool.etl -ets | Out-Host
+          $otherTool = $LASTEXITCODE -eq 0
+          if (-not $otherTool) { Write-Host '::warning::Could not start an NT Kernel Logger session to check W31.' }
+
           $buggy = Watch-Slowapp 'buggy' @()
           $fixed = Watch-Slowapp 'fixed' @('--fixed')
           # W26: slowapp exits about 3 s into the 8 s watch; names must come from the trace.
@@ -131,6 +136,13 @@ jobs:
           if ($exited -notmatch 'the program exited during the trace' -or $exited -notmatch 'slowapp!.*update_frame') {
             $failures += 'Exited run: function names were not found from the modules recorded in the trace.'
           }
+          if ($otherTool) {
+            logman query "NT Kernel Logger" -ets | Out-Null
+            if ($LASTEXITCODE -ne 0) { $failures += "W31: waitwhy stopped another tool's NT Kernel Logger session." }
+            logman stop "NT Kernel Logger" -ets | Out-Null
+          }
+          if ($buggy -match 'using the shared') { $failures += 'W31: waitwhy did not get a private trace session.' }
+
           # W28: the program's file I/O is traced and its files named; saver's file shows as the object.
           $buggyDump = Get-Content buggy-events.txt -Raw
           $fileIoLines = ([regex]::Matches($buggyDump, '(?m)^FILEIO ')).Count

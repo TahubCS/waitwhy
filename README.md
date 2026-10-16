@@ -121,7 +121,7 @@ Start-Process .\scenarios.exe -ArgumentList '--mode', 'lockcpu', '--seconds', '1
 
 ## How it works
 
-1. Starts the Windows kernel trace session ("NT Kernel Logger") with three kinds of events: **context switch** (a thread stops or starts running on a CPU), **ready thread** (one thread wakes another), and **thread start**.
+1. Starts a private Windows kernel trace session with these kinds of events: **context switch** (a thread stops or starts running on a CPU), **ready thread** (one thread wakes another), and **thread start**.
 2. Asks Windows to capture a **call stack** with every context switch.
 3. For each thread in the target program, measures every gap between "switched out because it is waiting" and "switched back in". The kernel also records the wait reason and the thread that woke it.
 4. Groups identical waits (same thread, same call stack), converts addresses to function names with DbgHelp, and labels each group in plain English from the function names (`FlushFileBuffers` means disk, `AcquireSRWLockExclusive` means lock, and so on).
@@ -131,7 +131,7 @@ Start-Process .\scenarios.exe -ArgumentList '--mode', 'lockcpu', '--seconds', '1
 | Limitation | Effect |
 |---|---|
 | Needs Administrator | Kernel tracing is a privileged feature |
-| Uses the single system-wide "NT Kernel Logger" session | If another tool (for example Process Explorer) is using it, waitwhy stops that session first and prints a note |
+| Uses a private kernel trace session (`waitwhy-<pid>`) | Other tools' "NT Kernel Logger" sessions keep running. Only where Windows cannot give a private session does waitwhy fall back to "NT Kernel Logger", stopping another tool's session there first and printing a note. A session left behind by a waitwhy that was killed is stopped on the next run |
 | A thread blocked for the whole window never switches, so it produces no events | Its location comes from one snapshot of its stack, taken when the trace ends (the thread is paused for the moment that takes); its wait reason is shown as "not known" |
 | Wake-ups from hardware interrupts (a disk or network card finishing) | Shown as "the system" or "outside your program" instead of a specific cause |
 | Very busy machines generate huge numbers of events | Windows may drop some; waitwhy prints a warning when it does |

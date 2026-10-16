@@ -75,6 +75,9 @@ static_assert(sizeof(void*) == 8, "Build waitwhy as a 64-bit (x64) program.");
 #ifndef INVALID_PROCESSTRACE_HANDLE
 #define INVALID_PROCESSTRACE_HANDLE ((TRACEHANDLE)INVALID_HANDLE_VALUE)
 #endif
+#ifndef EVENT_TRACE_SYSTEM_LOGGER_MODE
+#define EVENT_TRACE_SYSTEM_LOGGER_MODE 0x02000000
+#endif
 #ifndef PROCESS_TRACE_MODE_RAW_TIMESTAMP
 #define PROCESS_TRACE_MODE_RAW_TIMESTAMP 0x00001000
 #endif
@@ -88,6 +91,7 @@ using namespace waitwhy;
 // ---------------------------------------------------------------------------
 
 const wchar_t kLoggerName[] = L"NT Kernel Logger";
+const wchar_t kPrivatePrefix[] = L"waitwhy-";  // private sessions are named waitwhy-<pid> (W31)
 
 const GUID kSystemTraceControlGuid = {
     0x9e814aad, 0x3204, 0x11d2, {0x9a, 0x82, 0x00, 0x60, 0x08, 0xa8, 0x69, 0x39}};
@@ -516,12 +520,16 @@ void WINAPI OnEvent(PEVENT_RECORD ev) {
 // Kernel trace session
 // ---------------------------------------------------------------------------
 
-void FillProps(SessionProps& sp, bool forStart) {
+// The session being used: a private system-logger session (W31, D10), or the shared
+// "NT Kernel Logger" where Windows cannot give one.
+std::wstring g_sessionName = kLoggerName;
+
+void FillProps(SessionProps& sp, bool forStart, bool privateSession = false) {
   std::memset(&sp, 0, sizeof sp);
   sp.props.Wnode.BufferSize = sizeof sp;
   sp.props.LoggerNameOffset = offsetof(SessionProps, loggerName);
   if (!forStart) return;
-  sp.props.Wnode.Guid = kSystemTraceControlGuid;
+  if (!privateSession) sp.props.Wnode.Guid = kSystemTraceControlGuid;
   sp.props.Wnode.ClientContext = 1;  // timestamps from QueryPerformanceCounter
   sp.props.Wnode.Flags = WNODE_FLAG_TRACED_GUID;
   sp.props.EnableFlags =
@@ -529,24 +537,77 @@ void FillProps(SessionProps& sp, bool forStart) {
       EVENT_TRACE_FLAG_IMAGE_LOAD | EVENT_TRACE_FLAG_DISK_IO | EVENT_TRACE_FLAG_DISK_FILE_IO |
       EVENT_TRACE_FLAG_FILE_IO | EVENT_TRACE_FLAG_FILE_IO_INIT;
   sp.props.LogFileMode = EVENT_TRACE_REAL_TIME_MODE;
+  // A system-logger session (Windows 8 and later) gets the kernel's events under a name of its
+  // own, so tools using "NT Kernel Logger" keep running.
+  if (privateSession) sp.props.LogFileMode |= EVENT_TRACE_SYSTEM_LOGGER_MODE;
   sp.props.BufferSize = 256;  // KB per buffer; context switches are very frequent
   sp.props.MinimumBuffers = 128;
   sp.props.MaximumBuffers = 512;
   sp.props.FlushTimer = 1;
 }
 
-ULONG StopKernelSession(SessionProps* out = nullptr) {
+ULONG StopSession(const std::wstring& name, SessionProps* out = nullptr) {
   SessionProps sp;
   FillProps(sp, false);
-  ULONG rc = ControlTraceW(0, kLoggerName, &sp.props, EVENT_TRACE_CONTROL_STOP);
+  ULONG rc = ControlTraceW(0, name.c_str(), &sp.props, EVENT_TRACE_CONTROL_STOP);
   if (out) *out = sp;
   return rc;
 }
 
+ULONG StopKernelSession(SessionProps* out = nullptr) { return StopSession(g_sessionName, out); }
+
+// Private sessions of a waitwhy that was killed keep running and use up one of the few
+// system-logger sessions Windows allows. Stops those whose process is gone (W31).
+void StopLeftoverSessions() {
+  struct Slot {
+    EVENT_TRACE_PROPERTIES props;
+    wchar_t logger[1024];
+    wchar_t file[1024];
+  };
+  std::vector<Slot> slots(64);
+  std::vector<EVENT_TRACE_PROPERTIES*> list;
+  for (Slot& slot : slots) {
+    std::memset(&slot, 0, sizeof slot);
+    slot.props.Wnode.BufferSize = sizeof slot;
+    slot.props.LoggerNameOffset = offsetof(Slot, logger);
+    slot.props.LogFileNameOffset = offsetof(Slot, file);
+    list.push_back(&slot.props);
+  }
+  ULONG count = 0;
+  if (QueryAllTracesW(list.data(), static_cast<ULONG>(list.size()), &count) != ERROR_SUCCESS) return;
+  const size_t prefix = std::wcslen(kPrivatePrefix);
+  for (ULONG i = 0; i < count && i < slots.size(); ++i) {
+    const std::wstring name = slots[i].logger;
+    if (name.compare(0, prefix, kPrivatePrefix) != 0) continue;
+    const auto owner = static_cast<DWORD>(std::wcstoul(name.c_str() + prefix, nullptr, 10));
+    if (owner == GetCurrentProcessId()) continue;
+    HANDLE process = OpenProcess(SYNCHRONIZE, FALSE, owner);
+    const bool alive = process && WaitForSingleObject(process, 0) == WAIT_TIMEOUT;
+    if (process) CloseHandle(process);
+    if (alive) continue;
+    if (StopSession(name) == ERROR_SUCCESS)
+      std::printf("Note: stopped the trace session %s, left behind by a waitwhy that ended.\n",
+                  Narrow(name).c_str());
+  }
+}
+
 ULONG StartKernelSession(TRACEHANDLE* session) {
+  StopLeftoverSessions();
   SessionProps sp;
+  const std::wstring privateName = kPrivatePrefix + std::to_wstring(GetCurrentProcessId());
+  FillProps(sp, true, true);
+  ULONG rc = StartTraceW(session, privateName.c_str(), &sp.props);
+  if (rc == ERROR_SUCCESS) {
+    g_sessionName = privateName;
+    return rc;
+  }
+  if (rc == ERROR_ACCESS_DENIED) return rc;
+  std::printf("Note: a private trace session is not available here (error %lu); using the shared\n"
+              "      \"NT Kernel Logger\" session, which stops any other tool that uses it.\n",
+              rc);
+  g_sessionName = kLoggerName;
   FillProps(sp, true);
-  ULONG rc = StartTraceW(session, kLoggerName, &sp.props);
+  rc = StartTraceW(session, kLoggerName, &sp.props);
   if (rc == ERROR_ALREADY_EXISTS) {
     std::printf("Note: another tool left the kernel trace session running; stopping it first.\n");
     StopKernelSession();
@@ -1158,7 +1219,7 @@ int wmain(int argc, wchar_t** argv) {
   g_analysis.stacksOn = stacksOn;
 
   EVENT_TRACE_LOGFILEW logfile{};
-  logfile.LoggerName = const_cast<LPWSTR>(kLoggerName);
+  logfile.LoggerName = const_cast<LPWSTR>(g_sessionName.c_str());
   logfile.ProcessTraceMode = PROCESS_TRACE_MODE_REAL_TIME | PROCESS_TRACE_MODE_EVENT_RECORD |
                              PROCESS_TRACE_MODE_RAW_TIMESTAMP;
   logfile.EventRecordCallback = OnEvent;
