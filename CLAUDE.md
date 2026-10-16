@@ -62,6 +62,7 @@ was stuck in (DbgHelp + .pdb); and which thread woke it up.
 | `docs/report-schema.json` | JSON Schema of `--format json` (W34), version `waitwhy-report/1`. |
 | `tests/check.h` | Check helpers shared by the tests. |
 | `LICENSE` | MIT (D11). |
+| `CONTRIBUTING.md`, `.github/ISSUE_TEMPLATE/` | How to build, test and change waitwhy; bug report (asks for `--dump-events ... --redact`) and feature request forms (W48). |
 | `SECURITY.md`, `docs/threat-model.md` | How to report security problems; what waitwhy trusts and how each risk is handled (W46). |
 | `tests/fuzz_dump.cpp`, `tests/fuzz_json.cpp` | libFuzzer targets for the dump and JSON readers (W46, D12). Built with clang `-fsanitize=fuzzer,address,undefined` in the Linux CI job only. |
 | `CHANGELOG.md` | What each version changed (W42). Add to `## [Unreleased]` with user-visible changes; a release renames it to the version. |

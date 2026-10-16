@@ -1,0 +1,58 @@
+name: Bug report
+description: waitwhy reported something wrong, missed a wait, crashed or failed to start.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Security problems: please follow SECURITY.md instead of opening an issue.
+  - type: input
+    id: version
+    attributes:
+      label: waitwhy version
+      description: Output of `waitwhy --version`.
+      placeholder: waitwhy 1.0.0
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      description: Output of `winver` or `[Environment]::OSVersion.VersionString`.
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command line
+      description: The exact waitwhy command you ran.
+      render: powershell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected, and what happened instead
+      description: For example "main should wait on a lock in update_frame, but the report says the disk".
+    validations:
+      required: true
+  - type: textarea
+    id: report
+    attributes:
+      label: The report
+      description: The full report waitwhy printed (add --redact to leave out folder paths and your user and machine names).
+      render: text
+  - type: textarea
+    id: dump
+    attributes:
+      label: Event dump
+      description: |
+        If you can, run the same command with `--dump-events dump.txt --redact` and attach dump.txt
+        (drag it here). It lets the report be rebuilt and debugged on any machine.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checked
+      options:
+        - label: I ran waitwhy from an Administrator shell (for watch and record).
+        - label: I looked at docs/troubleshooting.md.

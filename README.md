@@ -46,6 +46,7 @@ Or build it yourself with `cl /nologo /W4 /WX /EHsc /O2 /Zi /std:c++17 /guard:cf
 - [FAQ](docs/faq.md)
 - [Known-answer scenarios](docs/scenarios/README.md): one small program per kind of wait, and what waitwhy says about it
 - [Using `waitwhy diff` as a CI gate](docs/ci-gate.md), and the [JSON report schema](docs/report-schema.json)
+- [Contributing](CONTRIBUTING.md), [security policy](SECURITY.md) and [threat model](docs/threat-model.md)
 
 ## Try it: the demo
 

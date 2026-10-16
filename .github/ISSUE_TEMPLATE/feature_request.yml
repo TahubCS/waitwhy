@@ -1,0 +1,21 @@
+name: Feature request
+description: Something waitwhy should tell you, or a way it should work.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What were you trying to find out?
+      description: The slowness you were investigating, and what the report did not tell you.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would help?
+      description: What waitwhy could show or do. A sketch of the report lines is welcome.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you use today
+      description: Other tools or workarounds, if any.
