@@ -9,6 +9,7 @@
 
 #include "../analysis.h"
 #include "../diff.h"
+#include "../dump.h"
 #include "../report.h"
 #include "check.h"
 
@@ -562,6 +563,27 @@ void CheckRedact() {
   ExpectStr("object kept by name", r.waits[0].objects[0].first, "...\\data.bin");
 }
 
+// W46: fuzz_dump's first find. A damaged dump is read without throwing: numbers that are not
+// numbers are left out instead of ending waitwhy.
+void CheckDamagedDump() {
+  std::printf("Damaged dumps (W46)\n");
+  std::istringstream in(
+      "DUMP version=2 pid=7 ticksPerSecond=1000\n"
+      "TARGET tid=1\n"
+      "STACK ts=0x eventTs=12 tid=1 frames=0xZZ,,0x1,[other\n"
+      "CSWITCH ts=99999999999999999999999 cpu=0 old=1 new=2 oldState=5 oldReason=37\n"
+      "SNAPSHOT tid=1 frames=-1,0x2\n");
+  const std::vector<DumpLine> lines = ReadDump(in);
+  ExpectEq("all lines read", lines.size(), 5);
+  ExpectEq("a bad number is text only", lines[2].field.count("ts"), 0);
+  ExpectEq("a too-large number is text only", lines[3].field.count("ts"), 0);
+  ExpectEq("bad frames left out", ParseFrames("0xZZ,,0x1,[other").size(), 1);
+  Analyzer an;
+  DumpReplay replay(an);
+  const DumpInfo info = replay.Run(lines);  // must not throw
+  ExpectEq("replayed", info.pid, 7);
+}
+
 void CheckDiff() {
   std::printf("Comparing two reports (W35)\n");
   const std::string fixed = R"js({"schema": "waitwhy-report/1", "program": "slowapp.exe",
@@ -613,6 +635,7 @@ int main() {
   CheckDiff();
   CheckBucketCap();
   CheckRedact();
+  CheckDamagedDump();
   std::printf(Failures() ? "%d check(s) failed.\n" : "All checks passed.\n", Failures());
   return Failures() ? 1 : 0;
 }

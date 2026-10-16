@@ -41,8 +41,10 @@
 #ifndef WAITWHY_DUMP_H
 #define WAITWHY_DUMP_H
 
+#include <cerrno>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <map>
@@ -68,12 +70,25 @@ struct DumpLine {
   }
 };
 
-// Parses "0x1,0x2,..." into addresses.
+// A whole number, decimal or 0x hex; false for anything else, without throwing: dumps can come
+// from other machines, damaged or made up (W46, found by fuzz_dump).
+inline bool ParseNumber(const std::string& text, uint64_t* value) {
+  if (text.empty() || text[0] < '0' || text[0] > '9') return false;
+  errno = 0;
+  char* end = nullptr;
+  const unsigned long long n = std::strtoull(text.c_str(), &end, 0);
+  if (errno == ERANGE || end != text.c_str() + text.size()) return false;
+  *value = n;
+  return true;
+}
+
+// Parses "0x1,0x2,..." into addresses; an item that is not a number is left out.
 inline std::vector<uint64_t> ParseFrames(const std::string& list) {
   std::vector<uint64_t> frames;
   std::istringstream in(list);
+  uint64_t addr = 0;
   for (std::string item; std::getline(in, item, ',');)
-    if (!item.empty()) frames.push_back(std::stoull(item, nullptr, 0));
+    if (ParseNumber(item, &addr)) frames.push_back(addr);
   return frames;
 }
 
@@ -98,8 +113,8 @@ inline DumpLine ParseDumpLine(const std::string& line, int number) {
     const std::string key = word.substr(0, eq);
     const std::string value = word.substr(eq + 1);
     l.text[key] = value;
-    if (!value.empty() && value[0] >= '0' && value[0] <= '9')
-      l.field[key] = std::stoull(value, nullptr, 0);
+    uint64_t parsed = 0;
+    if (ParseNumber(value, &parsed)) l.field[key] = parsed;  // otherwise text only
   }
   return l;
 }
