@@ -669,29 +669,58 @@ void SnapshotThreads(uint32_t pid) {
   CloseHandle(snap);
 }
 
+// The description a thread gave itself (SetThreadDescription), or empty.
+std::string ThreadDescription(uint32_t tid) {
+  using GetDescFn = HRESULT(WINAPI*)(HANDLE, PWSTR*);
+  static GetDescFn getDesc = reinterpret_cast<GetDescFn>(reinterpret_cast<void*>(
+      GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetThreadDescription")));
+  std::string name;
+  if (!getDesc) return name;
+  HANDLE th = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, tid);
+  if (!th) return name;
+  PWSTR desc = nullptr;
+  if (SUCCEEDED(getDesc(th, &desc)) && desc) {
+    name = Narrow(desc);
+    LocalFree(desc);
+  }
+  CloseHandle(th);
+  return name;
+}
+
+// Names of the program's threads, taken while they are alive, so a thread that ended during
+// the trace keeps its name in the report (W32: a launched program has usually exited). Only
+// the main thread uses it, through a snapshot of the process's own threads.
+std::unordered_map<uint32_t, std::string> g_threadNames;
+
+void RememberThreadNames(uint32_t pid) {
+  HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+  if (snap == INVALID_HANDLE_VALUE) return;
+  THREADENTRY32 te{};
+  te.dwSize = sizeof te;
+  for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
+    if (te.th32OwnerProcessID != pid) continue;
+    const std::string name = ThreadDescription(te.th32ThreadID);
+    if (!name.empty()) g_threadNames[te.th32ThreadID] = name;
+  }
+  CloseHandle(snap);
+}
+
 std::string ThreadLabel(uint32_t tid) {
   static std::unordered_map<uint32_t, std::string> cache;
   auto it = cache.find(tid);
   if (it != cache.end()) return it->second;
   std::string label = "Thread " + std::to_string(tid);
-  // Its ID may already belong to another thread, so do not look up a name for it.
-  if (g_analysis.exitedThreads.count(tid)) return cache[tid] = label + " (exited)";
-  using GetDescFn = HRESULT(WINAPI*)(HANDLE, PWSTR*);
-  static GetDescFn getDesc = reinterpret_cast<GetDescFn>(reinterpret_cast<void*>(
-      GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetThreadDescription")));
-  if (getDesc) {
-    HANDLE th = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, tid);
-    if (th) {
-      PWSTR desc = nullptr;
-      if (SUCCEEDED(getDesc(th, &desc)) && desc) {
-        if (desc[0]) label += " (" + Narrow(desc) + ")";
-        LocalFree(desc);
-      }
-      CloseHandle(th);
-    }
+  auto remembered = g_threadNames.find(tid);
+  // An ended thread's ID may already belong to another thread, so only the name taken while it
+  // was alive is used.
+  if (g_analysis.exitedThreads.count(tid)) {
+    if (remembered != g_threadNames.end()) return cache[tid] = label + " (" + remembered->second + ", exited)";
+    return cache[tid] = label + " (exited)";
   }
-  cache[tid] = label;
-  return label;
+  std::string name = ThreadDescription(tid);
+  if (name.empty() && remembered != g_threadNames.end()) name = remembered->second;
+  if (!name.empty()) label += " (" + name + ")";
+  return cache[tid] = label;
 }
 
 // Reads the user-mode call stack of a thread that is blocked right now, innermost first, by
@@ -1372,6 +1401,7 @@ int wmain(int argc, wchar_t** argv) {
       std::printf(".");
       std::fflush(stdout);
       nextDot += static_cast<uint64_t>(freq.QuadPart);
+      RememberThreadNames(pid);
     }
     const uint64_t untilMs = (std::min)(deadline, nextDot) - t;
     const auto waitMs = static_cast<DWORD>((std::min)(
@@ -1386,6 +1416,7 @@ int wmain(int argc, wchar_t** argv) {
 
   LARGE_INTEGER windowEnd;
   QueryPerformanceCounter(&windowEnd);
+  if (!programExited) RememberThreadNames(pid);
   g_windowEnd.store(static_cast<uint64_t>(windowEnd.QuadPart), std::memory_order_relaxed);
   SessionProps stopped;
   StopKernelSession(&stopped);  // ProcessTrace returns once the buffers are drained

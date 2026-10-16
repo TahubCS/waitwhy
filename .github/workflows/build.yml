@@ -162,7 +162,7 @@ jobs:
           if ($buggyDump -notmatch '(?m)^FILENAME .* kind=3 ') {
             Write-Host '::warning::No console file object was named in the buggy run (W28).'
           }
-          if ($launch -notmatch 'Started .*slowapp' -or $launch -notmatch '\(main\) spent \d+% of the time waiting for a lock that another thread was holding, in slowapp!.*update_frame\.') {
+          if ($launch -notmatch 'Started .*slowapp' -or $launch -notmatch '\(main(, exited)?\) spent \d+% of the time waiting for a lock that another thread was holding, in slowapp!.*update_frame\.') {
             $failures += 'Launch run: slowapp was not started and watched, or its lock wait was not found.'
           }
           if ($symbols -and $symbols -notmatch 'Function names   : full names in [^;\r\n]*ntdll') {
