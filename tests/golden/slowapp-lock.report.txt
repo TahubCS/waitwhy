@@ -59,9 +59,10 @@ What this means
     Its longest single wait was 2.80 s.
   * Thread 1 (main) spent 30% of the time waiting for a lock that another thread was holding, in slowapp!`anonymous namespace'::update_frame.
     Its longest single wait was 3.01 s.
-    The lock was released by Thread 2 (saver), which spends its time waiting for the disk, in slowapp!`anonymous namespace'::write_settings_to_disk.
-    It is most likely holding the lock during that slow work. Move the
-    slow work outside the lock (copy the data first, then do the work).
+    The lock was released by Thread 2 (saver). While Thread 1 (main) waited (3.01 s), Thread 2 (saver) was
+      waiting for the disk, in slowapp!`anonymous namespace'::write_settings_to_disk: 3.00 s (100%)
+    So it holds the lock while it is waiting for the disk. Move that work outside the lock
+    (copy the data first, then do the work).
 
 Data quality: high
   Events lost      : none

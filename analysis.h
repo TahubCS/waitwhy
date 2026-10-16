@@ -100,6 +100,21 @@ struct OffCpu {
   std::vector<uint64_t> stack;  // user-mode return addresses, innermost first
 };
 
+// One stretch of a thread's time, kept for wait chains (W25): what a thread was doing while
+// another one waited for it.
+struct Interval {
+  enum Kind : uint8_t { Running, Ready, Waiting };
+  uint64_t start = 0;
+  uint64_t end = 0;
+  uint64_t bucket = 0;  // Waiting: HashWait of its bucket, so (tid, bucket) finds it
+  uint32_t wokenBy = kUnknownThread;  // Waiting: the thread that ended it
+  Kind kind = Running;
+};
+
+// Upper limit on intervals kept for all threads together (about 32 MB). Beyond it no more are
+// kept and the report says its wait chains are incomplete.
+constexpr size_t kMaxIntervals = size_t{1} << 20;
+
 struct ThreadState {
   bool offCpu = false;  // `open` holds the period the thread is off the CPU right now
   OffCpu open;
@@ -117,6 +132,7 @@ struct ThreadState {
   // the trace, to its end, if it ended. 0 means the window's own start or end.
   uint64_t bornAt = 0;
   uint64_t endedAt = 0;
+  std::vector<Interval> intervals;  // in the order they were recorded, not sorted
 };
 
 // Wait durations on a log scale with four steps per doubling (W23), so a percentile is known to
@@ -217,6 +233,8 @@ class Analyzer {
   uint64_t kernelOnlyFragments = 0;  // stack events for a wait that held no user-mode frame
   uint64_t endedWaitTicks = 0;        // wait time in waits that ended inside the window
   uint64_t unknownWakerTicks = 0;     // ... of which no waker was seen (W24)
+  size_t intervalCount = 0;           // intervals kept, for all threads (W25)
+  bool intervalsTruncated = false;    // kMaxIntervals was reached
 
   bool IsTarget(uint32_t tid) const { return targetThreads.count(tid) != 0; }
   bool IsProgramThread(uint32_t tid) const {
@@ -251,6 +269,7 @@ class Analyzer {
       st.seen = true;
       if (st.running) {
         st.runTicks += ts - st.runStart;
+        Keep(st, Interval::Running, st.runStart, ts);
         st.running = false;
       }
       // An exited thread never comes back, so there is no off-CPU period to open.
@@ -376,7 +395,10 @@ class Analyzer {
   // Called after tracing stops: close out anything still in progress.
   void FlushAtEnd() {
     for (auto& [tid, st] : threads) {
-      if (st.running && lastTs > st.runStart) st.runTicks += lastTs - st.runStart;
+      if (st.running && lastTs > st.runStart) {
+        st.runTicks += lastTs - st.runStart;
+        Keep(st, Interval::Running, st.runStart, lastTs);
+      }
       for (auto& entry : st.awaitingStack) RecordWithoutStack(tid, st, entry.second);
       st.awaitingStack.clear();
       if (st.offCpu && lastTs > st.open.start) {
@@ -391,6 +413,7 @@ class Analyzer {
   void Record(uint32_t tid, ThreadState& st, const OffCpu& w, bool stillWaiting) {
     if (!w.isWait) {
       st.readyTicks += w.end > w.start ? w.end - w.start : 0;  // preempted: wanted the CPU
+      Keep(st, Interval::Ready, w.start, w.end);
       return;
     }
     // A wait ends when the thread is readied; from then until it is back on a CPU it only
@@ -399,7 +422,10 @@ class Analyzer {
     const uint64_t d = waitEnd > w.start ? waitEnd - w.start : 0;
     st.readyTicks += w.end > waitEnd ? w.end - waitEnd : 0;
     st.waitTicks += d;
-    Bucket& b = buckets[{tid, HashWait(w.reason, w.stack)}];
+    const uint64_t hash = HashWait(w.reason, w.stack);
+    Keep(st, Interval::Waiting, w.start, waitEnd, hash, w.wokenBy);
+    Keep(st, Interval::Ready, waitEnd, w.end);
+    Bucket& b = buckets[{tid, hash}];
     if (b.count == 0) {
       b.tid = tid;
       b.reason = w.reason;
@@ -414,6 +440,24 @@ class Analyzer {
       if (w.wokenBy == kUnknownThread) unknownWakerTicks += d;
     }
     if (w.wokenBy != kUnknownThread) b.wakers[w.wokenBy] += d;
+  }
+
+  // Keeps one interval of a thread's time for wait chains, while there is room.
+  void Keep(ThreadState& st, Interval::Kind kind, uint64_t start, uint64_t end, uint64_t bucket = 0,
+            uint32_t wokenBy = kUnknownThread) {
+    if (end <= start) return;
+    if (intervalCount >= kMaxIntervals) {
+      intervalsTruncated = true;
+      return;
+    }
+    Interval i;
+    i.start = start;
+    i.end = end;
+    i.bucket = bucket;
+    i.wokenBy = wokenBy;
+    i.kind = kind;
+    st.intervals.push_back(i);
+    ++intervalCount;
   }
 
   // Records a finished wait whose call stack never arrived.
@@ -440,7 +484,10 @@ class Analyzer {
     if (!IsTarget(e.tid)) return;
     ThreadState& st = threads[e.tid];
     const uint64_t ts = InWindow(e.ts);
-    if (st.running && ts > st.runStart) st.runTicks += ts - st.runStart;
+    if (st.running && ts > st.runStart) {
+      st.runTicks += ts - st.runStart;
+      Keep(st, Interval::Running, st.runStart, ts);
+    }
     st.running = false;
     st.endedAt = ts;
     for (auto& entry : st.awaitingStack) RecordWithoutStack(e.tid, st, entry.second);

@@ -236,3 +236,5 @@ Newest line last. Format: `YYYY-MM-DD  ID  status  note`.
 - 2026-10-16  W23  started  Buckets keep a log-scale duration histogram; rows show the longest wait and, from 20 waits, a 95th percentile; a lock, disk, network or page-fault group whose longest wait reaches --stall-ms (default 50) is a finding even under 10%.
 - 2026-10-16  W23  confirmed  CI run #70: golden report with longest waits matches; smoke test and rebuilt reports pass.
 - 2026-10-16  W24  started  Data-quality section with confidence high/medium/low (rules in README), stack coverage by wait time, known-waker share, symbol status per module (MODULE lines in dumps); replaces the counters footer.
+- 2026-10-16  W24  confirmed  CI run #71: golden data-quality section matches; smoke test and rebuilt reports pass.
+- 2026-10-16  W25  started  Each thread keeps its running, ready and waiting intervals (all threads together at most 2^20); lock and other-thread findings show what the waking thread did during exactly those waits, replacing "most likely".

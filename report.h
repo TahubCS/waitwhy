@@ -62,6 +62,16 @@ struct WaitRow {
   int8_t reason = 0;  // the known kernel wait reason with the most time; kReasonUnknown if none
 };
 
+// What the thread that ended a group of waits was doing during them (W25).
+struct ChainPart {
+  enum class Kind { Running, Ready, Waiting, NotSeen };
+  Kind kind = Kind::Waiting;
+  Category category = Category::Other;  // Kind::Waiting
+  std::string yourCode;                 // Kind::Waiting
+  double seconds = 0;
+  double pct = 0;  // of the waits' time
+};
+
 // One line of "What this means", with what explains it.
 struct Finding {
   enum class Kind { Wait, CpuCompetition };
@@ -79,6 +89,11 @@ struct Finding {
   std::string releaser;
   Category releaserCategory = Category::Other;
   std::string releaserCode;
+  // Measured wait chain (W25): the thread that ended these waits and what it did meanwhile,
+  // largest part first. Empty when nothing was measured.
+  std::string waker;
+  double chainSeconds = 0;  // the waits it ended
+  std::vector<ChainPart> chain;
 };
 
 // How far the report can be trusted (W24).
@@ -248,6 +263,69 @@ inline Report BuildReport(const Analyzer& an, SymbolSource& sym, const ReportOpt
   }
   std::vector<const WaitGroup*> groups;
   for (const auto& [key, g] : groupMap) groups.push_back(&g);
+  // Which group each bucket went into, for wait chains (W25).
+  std::map<std::pair<uint32_t, uint64_t>, const WaitGroup*> groupOfBucket;
+  for (const auto& [key, b] : an.buckets) {
+    if (idle(b.tid)) continue;
+    groupOfBucket[key] = &groupMap.at({b.tid, static_cast<int>(Classify(b, sym)), YourCodeFrame(b, sym)});
+  }
+
+  // What thread `waker` did during the waits of `waiter` in `g` that it ended (W25).
+  auto measureChain = [&](uint32_t waiter, const WaitGroup* g, uint32_t waker, Finding& f) {
+    auto wt = an.threads.find(waiter);
+    auto kt = an.threads.find(waker);
+    if (wt == an.threads.end() || kt == an.threads.end()) return;
+    std::vector<Interval> theirs = kt->second.intervals;
+    std::sort(theirs.begin(), theirs.end(),
+              [](const Interval& x, const Interval& y) { return x.start < y.start; });
+    uint64_t total = 0, running = 0, ready = 0;
+    std::map<const WaitGroup*, uint64_t> waiting;
+    for (const Interval& w : wt->second.intervals) {
+      if (w.kind != Interval::Waiting || w.wokenBy != waker) continue;
+      auto gi = groupOfBucket.find({waiter, w.bucket});
+      if (gi == groupOfBucket.end() || gi->second != g) continue;
+      total += w.end - w.start;
+      // Intervals of one thread do not overlap, so the first one that may overlap is found
+      // by its start, one step back.
+      auto it = std::lower_bound(theirs.begin(), theirs.end(), w.start,
+                                 [](const Interval& x, uint64_t t) { return x.start < t; });
+      if (it != theirs.begin()) --it;
+      for (; it != theirs.end() && it->start < w.end; ++it) {
+        const uint64_t a = (std::max)(it->start, w.start), b = (std::min)(it->end, w.end);
+        if (b <= a) continue;
+        if (it->kind == Interval::Running) running += b - a;
+        else if (it->kind == Interval::Ready) ready += b - a;
+        else {
+          auto ki = groupOfBucket.find({waker, it->bucket});
+          if (ki != groupOfBucket.end()) waiting[ki->second] += b - a;
+        }
+      }
+    }
+    if (total == 0) return;
+    auto part = [&](ChainPart::Kind kind, uint64_t ticks, const WaitGroup* wg) {
+      ChainPart p;
+      p.kind = kind;
+      p.seconds = secs(ticks);
+      p.pct = 100.0 * static_cast<double>(ticks) / static_cast<double>(total);
+      if (wg) {
+        p.category = wg->category;
+        p.yourCode = wg->yourCode;
+      }
+      if (p.pct >= 1.0) f.chain.push_back(p);
+    };
+    uint64_t covered = running + ready;
+    for (const auto& [wg, ticks] : waiting) {
+      part(ChainPart::Kind::Waiting, ticks, wg);
+      covered += ticks;
+    }
+    part(ChainPart::Kind::Running, running, nullptr);
+    part(ChainPart::Kind::Ready, ready, nullptr);
+    if (covered < total) part(ChainPart::Kind::NotSeen, total - covered, nullptr);
+    std::stable_sort(f.chain.begin(), f.chain.end(),
+                     [](const ChainPart& x, const ChainPart& y) { return x.seconds > y.seconds; });
+    f.waker = name(waker);
+    f.chainSeconds = secs(total);
+  };
   std::stable_sort(groups.begin(), groups.end(),
                    [](const WaitGroup* x, const WaitGroup* y) { return x->ticks > y->ticks; });
   r.anyWaits = !groups.empty();
@@ -305,6 +383,9 @@ inline Report BuildReport(const Analyzer& an, SymbolSource& sym, const ReportOpt
       f.longWait = longWait;
       f.onlyLongWait = !bigShare;
       const uint32_t waker = TopWaker(*g);
+      if ((c == Category::Lock || c == Category::OtherThread) && an.IsProgramThread(waker) &&
+          waker != tid)
+        measureChain(tid, g, waker, f);
       if (c == Category::Lock && an.IsProgramThread(waker) && waker != tid) {
         // What was the thread that released the lock busy with?
         for (const WaitGroup* wg : groups) {
@@ -383,6 +464,7 @@ inline Report BuildReport(const Analyzer& an, SymbolSource& sym, const ReportOpt
   if (!q.programNamed) lower(DataQuality::Level::Low, "no .pdb for the program");
   if (q.wakerKnownPct >= 0 && q.wakerKnownPct < 90)
     lower(DataQuality::Level::Medium, "many wakers unknown");
+  if (an.intervalsTruncated) lower(DataQuality::Level::Medium, "wait chains incomplete");
   return r;
 }
 
@@ -481,7 +563,40 @@ inline std::string RenderText(const Report& r) {
       if (f.longWait)
         Appendf(out, "    Its longest single wait was %s.\n", FormatDuration(f.longestSeconds).c_str());
     }
-    if (f.hasReleaser) {
+    if (!f.chain.empty()) {
+      // Measured (W25): what the waker did while this thread waited for it.
+      if (f.category == Category::Lock)
+        Appendf(out, "    The lock was released by %s. While %s waited (%s), %s was\n",
+                f.waker.c_str(), f.thread.c_str(), FormatDuration(f.chainSeconds).c_str(),
+                f.waker.c_str());
+      else
+        Appendf(out, "    It was woken by %s. While %s waited (%s), %s was\n", f.waker.c_str(),
+                f.thread.c_str(), FormatDuration(f.chainSeconds).c_str(), f.waker.c_str());
+      for (size_t k = 0; k < f.chain.size() && k < 3; ++k) {
+        const ChainPart& p = f.chain[k];
+        std::string what = p.kind == ChainPart::Kind::Running   ? "running"
+                           : p.kind == ChainPart::Kind::Ready   ? "waiting for a free CPU"
+                           : p.kind == ChainPart::Kind::NotSeen ? "not seen (outside the trace)"
+                                                                : std::string(CategorySentence(p.category)) + ", in " + p.yourCode;
+        Appendf(out, "      %s: %s (%.0f%%)\n", what.c_str(), FormatDuration(p.seconds).c_str(), p.pct);
+      }
+      const ChainPart& top = f.chain.front();
+      if (f.category == Category::Lock) {
+        if (top.kind == ChainPart::Kind::Running)
+          Appendf(out, "    So it holds the lock while it is running. Do less work while holding the lock.\n");
+        else if (top.kind == ChainPart::Kind::Ready)
+          Appendf(out, "    So it holds the lock while it is waiting for a free CPU. The machine is overloaded.\n");
+        else if (top.kind == ChainPart::Kind::Waiting && top.category == Category::Sleep)
+          Appendf(out, "    So it holds the lock while it is sleeping on purpose. Release the lock before sleeping.\n");
+        else if (top.kind == ChainPart::Kind::Waiting && top.category == Category::Lock)
+          Appendf(out, "    So it holds the lock while it is waiting for another lock: one lock waits on the next.\n");
+        else if (top.kind == ChainPart::Kind::Waiting)
+          Appendf(out,
+                  "    So it holds the lock while it is %s. Move that work outside the lock\n"
+                  "    (copy the data first, then do the work).\n",
+                  CategorySentence(top.category));
+      }
+    } else if (f.hasReleaser) {
       Appendf(out, "    The lock was released by %s, which spends its time %s, in %s.\n",
               f.releaser.c_str(), CategorySentence(f.releaserCategory), f.releaserCode.c_str());
       Appendf(out,

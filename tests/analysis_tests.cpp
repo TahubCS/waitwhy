@@ -210,6 +210,12 @@ void CheckReadySplitsWaitTime() {
     if (b.tid == 100 && b.reason == 37) lockTicks = b.ticks, waker = TopWaker(b);
   ExpectEq("lock bucket ticks", lockTicks, 300);
   ExpectEq("lock released by", waker, 200);
+  // W25: running 1000-1100, waiting 1100-1400 (ended by 200), ready 1400-1500, running 1500-1600.
+  ExpectEq("intervals kept for wait chains", t.intervals.size(), 4);
+  unsigned long long waitedFor200 = 0;
+  for (const Interval& i : t.intervals)
+    if (i.kind == Interval::Waiting && i.wokenBy == 200) waitedFor200 += i.end - i.start;
+  ExpectEq("time waiting for thread 200", waitedFor200, 300);
 }
 
 // W20: the window starts when tracing starts. An event logged earlier still sets the thread's
