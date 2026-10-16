@@ -1,75 +1,27 @@
-// replay_events.cpp - replays a waitwhy --dump-events file through the analysis core
-// (analysis.h) and checks the stack-matching results. It makes no Windows calls, so it builds
-// and runs on any machine with a C++17 compiler, in CI on Windows and Linux.
+// replay_events.cpp - replays waitwhy --dump-events files through the analysis core
+// (analysis.h, dump.h) and checks the stack-matching results. It makes no Windows calls, so it
+// builds and runs on any machine with a C++17 compiler, in CI on Windows and Linux.
 //
 // Build and run (x64 Developer PowerShell for VS, from the repository root):
-//   cl /nologo /EHsc /O2 /std:c++17 tests\replay_events.cpp /Fe:replay_events.exe
+//   cl /nologo /W4 /WX /EHsc /O2 /std:c++17 tests\replay_events.cpp /Fe:replay_events.exe
 //   .\replay_events.exe docs\traces\buggy-64mb-events.txt
 // or with GCC/Clang:
 //   g++ -std=c++17 -O2 -Wall -Wextra tests/replay_events.cpp -o replay_events
 //   ./replay_events docs/traces/buggy-64mb-events.txt
 //
-// A dump has one line per event and no full stacks: a STACK line gives the number of kernel
-// and user frames and the first user address. The replay rebuilds each user stack from that,
-// so stacks with the same first user address and depth look identical. Function names are
-// therefore not checked here, only which waits get a stack. tests/decode_tests.cpp replays the
-// same dump through waitwhy's ETW decoding as well.
+// The recorded trace is a version 1 dump: a STACK line gives the number of kernel and user
+// frames and only the first user address, so function names are not checked against it, only
+// which waits get a stack. tests/decode_tests.cpp replays the same dump through waitwhy's ETW
+// decoding as well. A small hand-written version 2 dump checks the lines W18 added.
 
-#include "../analysis.h"
-#include "dump_reader.h"
+#include <sstream>
+
+#include "../dump.h"
+#include "check.h"
 
 using namespace waitwhy;
 
 namespace {
-
-// The program's threads are the ones that were readied or had stacks recorded.
-void AddTargetThreads(Analyzer& an, const std::vector<DumpLine>& lines) {
-  for (const DumpLine& l : lines) {
-    if (l.kind == "READY") an.targetThreads.insert(static_cast<uint32_t>(l.field.at("readied")));
-    if (l.kind == "STACK") an.targetThreads.insert(static_cast<uint32_t>(l.field.at("tid")));
-  }
-}
-
-// Decodes one dump line the way waitwhy.cpp decodes the kernel event behind it.
-class Replayer {
- public:
-  explicit Replayer(Analyzer& an) : an_(an), cpuThread_(256, kUnknownThread) {}
-
-  void Feed(const DumpLine& l) {
-    if (l.kind == "CSWITCH") {
-      SwitchEvent e;
-      e.ts = l.field.at("ts");
-      e.oldTid = static_cast<uint32_t>(l.field.at("old"));
-      e.newTid = static_cast<uint32_t>(l.field.at("new"));
-      e.oldState = static_cast<int8_t>(l.field.at("oldState"));
-      e.oldWaitReason = static_cast<int8_t>(l.field.at("oldReason"));
-      const size_t cpu = l.field.at("cpu");
-      if (cpu < cpuThread_.size()) cpuThread_[cpu] = e.newTid;
-      an_.OnSwitch(e);
-    } else if (l.kind == "READY") {
-      ReadyEvent e;
-      e.ts = l.field.at("ts");
-      e.readiedTid = static_cast<uint32_t>(l.field.at("readied"));
-      const size_t cpu = l.field.at("cpu");
-      e.byTid = ResolveWaker(static_cast<uint8_t>(l.field.at("flag")),
-                             static_cast<uint32_t>(l.field.at("headerThread")),
-                             cpu < cpuThread_.size() ? cpuThread_[cpu] : kUnknownThread);
-      an_.OnReady(e);
-    } else if (l.kind == "STACK") {
-      StackEvent e;
-      e.ts = l.field.at("ts");
-      e.eventTs = l.field.at("eventTs");
-      e.tid = static_cast<uint32_t>(l.field.at("tid"));
-      for (uint64_t i = 0; i < l.field.at("userFrames"); ++i)
-        e.userFrames.push_back(i == 0 ? l.field.at("firstUser") : 0x00007FF600001000ull + i * 16);
-      an_.OnStack(e);
-    }
-  }
-
- private:
-  Analyzer& an_;
-  std::vector<uint32_t> cpuThread_;
-};
 
 // Waits of `tid` recorded with a stack whose innermost user frame is `firstUser`.
 unsigned long long WaitsWithFirstFrame(const Analyzer& an, uint32_t tid, uint64_t firstUser) {
@@ -85,10 +37,8 @@ unsigned long long WaitsWithFirstFrame(const Analyzer& an, uint32_t tid, uint64_
 void CheckSixWaitsShareOneStack(const std::vector<DumpLine>& all) {
   std::printf("Lines 108-135: one user stack for six waits of one system call\n");
   Analyzer an;
-  an.pid = 1;
-  an.stacksOn = true;
-  AddTargetThreads(an, all);
-  Replayer replay(an);
+  DumpReplay replay(an);
+  replay.Prepare(all);
   for (const DumpLine& l : all)
     if (l.number >= 108 && l.number <= 135) replay.Feed(l);
   const uint32_t saver = 29716;
@@ -103,16 +53,86 @@ void CheckSixWaitsShareOneStack(const std::vector<DumpLine>& all) {
 void CheckWholeTrace(const std::vector<DumpLine>& all) {
   std::printf("Whole trace\n");
   Analyzer an;
-  an.pid = 1;
-  an.stacksOn = true;
-  AddTargetThreads(an, all);
-  Replayer replay(an);
-  for (const DumpLine& l : all) replay.Feed(l);
-  an.FlushAtEnd();
+  DumpReplay replay(an);
+  const DumpInfo info = replay.Run(all);
+  ExpectEq("read as version 1", info.version, 1);
   ExpectEq("context switches", an.contextSwitches, 3891);
   ExpectEq("waits with a stack", an.waitsWithStack, 1552);
   ExpectEq("waits without a stack", an.waitsWithoutStack, 4);
   ExpectEq("kernel-only stack parts", an.kernelOnlyFragments, 1552);
+}
+
+// A version 2 dump (W18): main (1) blocks on a lock that saver (2) releases; the user stack
+// arrives in two parts; a thread is created in the program and one in another process; main
+// is still asleep when tracing stops and gets a snapshot.
+const char kVersion2[] = R"(# waitwhy event dump, version 2
+DUMP version=2 pid=42 ticksPerSecond=1000
+TARGET tid=1
+TARGET tid=2
+WINDOW ts=100
+CSWITCH ts=100 cpu=0 old=0 new=1 oldState=0 oldReason=0
+CSWITCH ts=110 cpu=0 old=1 new=2 oldState=5 oldReason=37
+READY ts=150 cpu=0 readied=1 headerThread=2 flag=0x00 by=2
+CSWITCH ts=160 cpu=0 old=2 new=1 oldState=5 oldReason=0
+STACK ts=161 eventTs=160 tid=1 kernelFrames=3 userFrames=0 firstUser=0x0
+STACK ts=170 eventTs=160 tid=1 kernelFrames=0 userFrames=2 firstUser=0x7ff600000010 frames=0x7ff600000010,0x7ff600000020
+THREAD ts=180 kind=0 pid=42 tid=3
+THREAD ts=185 kind=0 pid=99 tid=4
+CSWITCH ts=190 cpu=0 old=1 new=0 oldState=5 oldReason=4
+END ts=300 contextSwitches=50 stacksOn=1 eventsLost=0 buffersLost=0
+SNAPSHOT tid=1 frames=0x7ff600000030
+EXE name=slowapp.exe
+SYMBOL addr=0x7ff600000010 name=ntdll!RtlSleepConditionVariableSRW
+SYMBOL addr=0x7ff600000020 name=slowapp!`anonymous namespace'::update_frame
+SOURCE addr=0x7ff600000020 file=c:\src\slowapp.cpp
+THREADNAME tid=1 name=Thread 1 (main)
+)";
+
+void CheckVersion2() {
+  std::printf("Version 2 dump\n");
+  std::vector<DumpLine> lines;
+  std::istringstream in(kVersion2);
+  int number = 0;
+  for (std::string text; std::getline(in, text);) {
+    ++number;
+    if (!text.empty() && text[0] != '#') lines.push_back(ParseDumpLine(text, number));
+  }
+
+  Analyzer an;
+  DumpReplay replay(an);
+  const DumpInfo info = replay.Run(lines);
+  ExpectEq("version", info.version, 2);
+  ExpectEq("pid", an.pid, 42);
+  ExpectEq("ticks per second", static_cast<unsigned long long>(info.ticksPerSecond), 1000);
+  ExpectStr("program file", info.exeFile, "slowapp.exe");
+  ExpectStr("thread name", info.threadNames.count(1) ? info.threadNames.at(1) : "", "Thread 1 (main)");
+  ExpectEq("threads of the program (created one added)", an.targetThreads.size(), 3);
+  ExpectEq("window end from END", an.lastTs, 300);
+  ExpectEq("context switches from END", an.contextSwitches, 50);
+  ExpectEq("waits with a stack", an.waitsWithStack, 1);
+  ExpectEq("waits without a stack (window-start waits)", an.waitsWithoutStack, 2);
+  ExpectEq("kernel-only stack parts", an.kernelOnlyFragments, 1);
+  const ThreadState& mainThread = an.threads.at(1);
+  ExpectEq("main waiting (40 lock + 110 asleep at the end)", mainThread.waitTicks, 150);
+  ExpectEq("main running", mainThread.runTicks, 40);
+  ExpectEq("main ready", mainThread.readyTicks, 10);
+
+  DumpSymbols sym(lines);
+  for (const auto& [key, b] : an.buckets) {
+    if (b.tid == 1 && b.reason == 37) {
+      ExpectEq("lock wait ticks", b.ticks, 40);
+      ExpectEq("lock released by saver", TopWaker(b), 2);
+      ExpectStr("your code, named from the dump", YourCodeFrame(b, sym),
+                "slowapp!`anonymous namespace'::update_frame");
+      ExpectStr("blocked in", BlockedInFrame(b, sym), "ntdll!RtlSleepConditionVariableSRW");
+    }
+    if (b.tid == 1 && b.reason == 4) {
+      ExpectEq("sleep still waiting at the end", b.stillWaitingAtEnd, 1);
+      ExpectEq("sleep stack from the snapshot", b.stack.size() == 1 ? b.stack[0] : 0, 0x7ff600000030);
+    }
+  }
+  ExpectStr("source file", sym.SourceFile(0x7ff600000020), "c:\\src\\slowapp.cpp");
+  ExpectStr("address without a name", sym.Name(0x1234), "?!0x1234");
 }
 
 }  // namespace
@@ -127,6 +147,7 @@ int main(int argc, char** argv) {
   std::printf("Replaying %zu events from %s\n", lines.size(), path);
   CheckSixWaitsShareOneStack(lines);
   CheckWholeTrace(lines);
+  CheckVersion2();
   std::printf(Failures() ? "%d check(s) failed.\n" : "All checks passed.\n", Failures());
   return Failures() ? 1 : 0;
 }

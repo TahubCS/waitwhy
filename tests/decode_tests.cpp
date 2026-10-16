@@ -13,7 +13,10 @@
 #endif
 #include "../waitwhy.cpp"
 
-#include "dump_reader.h"
+#include "../dump.h"
+#include "check.h"
+
+using namespace waitwhy;
 
 namespace {
 

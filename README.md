@@ -50,7 +50,7 @@ If your disk is very fast and the buggy numbers look small, start slowapp with m
 .\waitwhy.exe --pid 1234 --top 10
 ```
 
-To see the raw kernel events behind a report, add `--dump-events FILE`. It writes one line per context switch, ready-thread and call-stack event of the program's threads, in the order Windows delivered them, and still prints the normal report:
+To see the raw kernel events behind a report, add `--dump-events FILE`. It writes one line per context switch, ready-thread, thread and call-stack event of the program's threads, in the order Windows delivered them, then the names of every function and thread the report uses, and still prints the normal report. The dump holds everything needed to rebuild the report without Windows, so attach it to a bug report. The format is described at the top of `dump.h`:
 
 ```powershell
 .\waitwhy.exe --name slowapp.exe --seconds 5 --dump-events dump.txt

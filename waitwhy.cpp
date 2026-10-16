@@ -54,6 +54,7 @@
 #include <vector>
 
 #include "analysis.h"
+#include "dump.h"
 
 #ifdef _MSC_VER
 #pragma comment(lib, "advapi32.lib")
@@ -158,6 +159,11 @@ void OnCSwitch(const EVENT_RECORD* ev, uint64_t ts) {
     ++g_dumpLines;
   }
 
+  if (g_dump && g_analysis.firstTs == 0) {
+    std::fprintf(g_dump, "WINDOW ts=%llu\n", static_cast<unsigned long long>(ts));
+    ++g_dumpLines;
+  }
+
   SwitchEvent e;
   e.ts = ts;
   e.oldTid = c.oldThreadId;
@@ -176,17 +182,17 @@ void OnReadyThread(const EVENT_RECORD* ev) {
   const uint8_t flag = ev->UserDataLength >= 7 ? static_cast<const uint8_t*>(ev->UserData)[6] : 0;
   const auto ts = static_cast<uint64_t>(ev->EventHeader.TimeStamp.QuadPart);
   const unsigned cpu = ev->BufferContext.ProcessorNumber;
-  if (g_dump) {
-    std::fprintf(g_dump, "READY ts=%llu cpu=%u readied=%u headerThread=%u flag=0x%02x\n",
-                 static_cast<unsigned long long>(ts), cpu, readied,
-                 static_cast<unsigned>(ev->EventHeader.ThreadId), flag);
-    ++g_dumpLines;
-  }
   ReadyEvent e;
   e.ts = ts;
   e.readiedTid = readied;
   e.byTid = ResolveWaker(flag, ev->EventHeader.ThreadId,
                          cpu < g_cpuThread.size() ? g_cpuThread[cpu] : kUnknownThread);
+  if (g_dump) {
+    std::fprintf(g_dump, "READY ts=%llu cpu=%u readied=%u headerThread=%u flag=0x%02x by=%u\n",
+                 static_cast<unsigned long long>(ts), cpu, readied,
+                 static_cast<unsigned>(ev->EventHeader.ThreadId), flag, e.byTid);
+    ++g_dumpLines;
+  }
   g_analysis.OnReady(e);
 }
 
@@ -198,6 +204,11 @@ void OnThreadEvent(const EVENT_RECORD* ev, ThreadEvent::Kind kind) {
   e.kind = kind;
   std::memcpy(&e.pid, ev->UserData, sizeof e.pid);
   std::memcpy(&e.tid, static_cast<const uint8_t*>(ev->UserData) + 4, sizeof e.tid);
+  if (g_dump && e.pid == g_analysis.pid) {
+    std::fprintf(g_dump, "THREAD ts=%llu kind=%d pid=%u tid=%u\n",
+                 static_cast<unsigned long long>(e.ts), static_cast<int>(kind), e.pid, e.tid);
+    ++g_dumpLines;
+  }
   g_analysis.OnThread(e);
 }
 
@@ -227,10 +238,12 @@ void OnStackWalk(const EVENT_RECORD* ev) {
   if (g_dump) {
     std::fprintf(g_dump,
                  "STACK ts=%llu eventTs=%llu tid=%u kernelFrames=%llu userFrames=%llu "
-                 "firstUser=0x%llx\n",
+                 "firstUser=0x%llx",
                  static_cast<unsigned long long>(e.ts), static_cast<unsigned long long>(e.eventTs),
                  e.tid, kernelFrames, static_cast<unsigned long long>(e.userFrames.size()),
                  static_cast<unsigned long long>(e.userFrames.empty() ? 0 : e.userFrames.front()));
+    WriteFrames(g_dump, e.userFrames);
+    std::fputc('\n', g_dump);
     ++g_dumpLines;
   }
 
@@ -431,6 +444,11 @@ void SnapshotThreadsStillBlocked() {
     if (!g_analysis.NeedsSnapshot(tid)) continue;
     std::vector<uint64_t> frames;
     if (!SnapshotStack(proc, tid, &frames)) continue;  // gone; leave it as never seen
+    if (g_dump) {
+      std::fprintf(g_dump, "SNAPSHOT tid=%u", tid);
+      WriteFrames(g_dump, frames);
+      std::fputc('\n', g_dump);
+    }
     g_analysis.ApplySnapshot(tid, std::move(frames));
   }
   SymCleanup(proc);
@@ -531,19 +549,44 @@ std::string WakerLabel(uint32_t tid) {
   return "outside your program (thread " + std::to_string(tid) + ")";
 }
 
+// Ends a dump with every name the report uses (W18), so the report can be rebuilt from the
+// dump alone: the program's file, each address in a wait's stack, and the thread labels.
+void WriteDumpNames(FILE* out, Symbolizer& sym) {
+  const Analyzer& an = g_analysis;
+  if (!sym.ExeFile().empty()) std::fprintf(out, "EXE name=%s\n", sym.ExeFile().c_str());
+  std::map<uint64_t, bool> addrs;  // sorted, so dumps of the same run compare equal
+  for (const auto& [key, b] : an.buckets)
+    for (uint64_t a : b.stack) addrs[a] = true;
+  for (const auto& [addr, unused] : addrs) {
+    (void)unused;
+    std::fprintf(out, "SYMBOL addr=0x%llx name=%s\n", static_cast<unsigned long long>(addr),
+                 sym.Name(addr).c_str());
+    const std::string& file = sym.SourceFile(addr);
+    if (!file.empty())
+      std::fprintf(out, "SOURCE addr=0x%llx file=%s\n", static_cast<unsigned long long>(addr),
+                   file.c_str());
+  }
+  std::map<uint32_t, bool> tids;
+  for (const auto& [tid, st] : an.threads) tids[tid] = true;
+  for (uint32_t tid : an.targetThreads) tids[tid] = true;
+  for (uint32_t tid : an.exitedThreads) tids[tid] = true;
+  for (const auto& [tid, unused] : tids) {
+    (void)unused;
+    std::fprintf(out, "THREADNAME tid=%u name=%s\n", tid, ThreadLabel(tid).c_str());
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Report
 // ---------------------------------------------------------------------------
 
-void PrintReport(double ticksPerSecond, int topN, const SessionProps& stopped, bool stacksOn) {
+void PrintReport(double ticksPerSecond, int topN, const SessionProps& stopped, bool stacksOn,
+                 Symbolizer& sym, bool symbolsOk) {
   const Analyzer& an = g_analysis;
   const double window =
       an.lastTs > an.firstTs ? static_cast<double>(an.lastTs - an.firstTs) / ticksPerSecond : 0.0;
   auto secs = [&](uint64_t ticks) { return static_cast<double>(ticks) / ticksPerSecond; };
   auto pct = [&](uint64_t ticks) { return window > 0 ? 100.0 * secs(ticks) / window : 0.0; };
-
-  Symbolizer sym;
-  bool symbolsOk = sym.Init(an.pid);
 
   std::printf("\n==============================================================\n");
   std::printf(" waitwhy report: %s (PID %u), watched for %s\n",
@@ -725,13 +768,13 @@ int wmain(int argc, wchar_t** argv) {
     }
     std::setvbuf(g_dump, nullptr, _IOFBF, 1 << 20);
     std::fprintf(g_dump,
-                 "# waitwhy raw event dump for PID %u\n"
-                 "# Timestamps are QueryPerformanceCounter ticks, %lld per second.\n"
-                 "# One line per event for the program's threads, in the order delivered.\n"
-                 "# CSWITCH ts cpu old new oldState oldReason\n"
-                 "# READY   ts cpu readied headerThread flag\n"
-                 "# STACK   ts eventTs tid kernelFrames userFrames firstUser\n",
+                 "# waitwhy raw event dump, version 2 (the format is described in dump.h)\n"
+                 "# Timestamps are QueryPerformanceCounter ticks.\n"
+                 "# One line per event for the program's threads, in the order delivered,\n"
+                 "# then what the report needs: the stop, snapshots, symbols and thread names.\n"
+                 "DUMP version=2 pid=%u ticksPerSecond=%lld\n",
                  pid, static_cast<long long>(freq.QuadPart));
+    for (uint32_t tid : g_analysis.targetThreads) std::fprintf(g_dump, "TARGET tid=%u\n", tid);
   }
 
   TRACEHANDLE session = 0;
@@ -782,15 +825,24 @@ int wmain(int argc, wchar_t** argv) {
   CloseTrace(consumer);
   CloseHandle(target);
   if (g_dump) {
+    std::fprintf(g_dump, "END ts=%llu contextSwitches=%llu stacksOn=%d eventsLost=%lu buffersLost=%lu\n",
+                 static_cast<unsigned long long>(g_analysis.lastTs),
+                 static_cast<unsigned long long>(g_analysis.contextSwitches), stacksOn ? 1 : 0,
+                 stopped.props.EventsLost, stopped.props.RealTimeBuffersLost);
+  }
+
+  if (g_analysis.firstTs != 0) SnapshotThreadsStillBlocked();
+  g_analysis.FlushAtEnd();
+  Symbolizer sym;
+  const bool symbolsOk = sym.Init(pid);
+  if (g_dump) {
+    WriteDumpNames(g_dump, sym);
     std::fclose(g_dump);
     g_dump = nullptr;
     std::printf("Wrote %llu events to %s.\n", static_cast<unsigned long long>(g_dumpLines),
                 Narrow(dumpPath).c_str());
   }
-
-  if (g_analysis.firstTs != 0) SnapshotThreadsStillBlocked();
-  g_analysis.FlushAtEnd();
-  PrintReport(static_cast<double>(freq.QuadPart), topN, stopped, stacksOn);
+  PrintReport(static_cast<double>(freq.QuadPart), topN, stopped, stacksOn, sym, symbolsOk);
   return kExitOk;
 }
 #endif  // WAITWHY_NO_MAIN

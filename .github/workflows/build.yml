@@ -58,8 +58,9 @@ jobs:
             $app = Start-Process -FilePath (Resolve-Path .\slowapp.exe) -PassThru -WindowStyle Hidden `
               -ArgumentList (@('--seconds', '20', '--mb', '64') + $SlowappArgs)
             Start-Sleep -Seconds 3
-            $text = & .\waitwhy.exe --pid $app.Id --seconds 8 2>&1 | Out-String
+            $text = & .\waitwhy.exe --pid $app.Id --seconds 8 --dump-events "$Label-events.txt" 2>&1 | Out-String
             $code = $LASTEXITCODE
+            Set-Content -Path "$Label-report.txt" -Value $text -Encoding utf8
             if (-not $app.HasExited) { Stop-Process -Id $app.Id -ErrorAction SilentlyContinue }
             Write-Host "===== waitwhy on $Label slowapp (exit code $code) ====="
             Write-Host $text
@@ -92,6 +93,19 @@ jobs:
           foreach ($f in $failures) { Write-Host "::error::$f" }
           if ($failures.Count -gt 0) { exit 1 }
           Write-Host 'C8 holds: the bug is reported in the buggy run and not in the fixed run.'
+
+      # The smoke runs' event dumps (version 2, W18) and reports, for turning into test fixtures.
+      - name: Keep the smoke-test dumps and reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-dumps
+          path: |
+            buggy-events.txt
+            buggy-report.txt
+            fixed-events.txt
+            fixed-report.txt
+          if-no-files-found: ignore
 
   # The analysis core (analysis.h) makes no Windows calls (D7), so its tests also run here, with
   # GCC and Clang and every warning as an error.

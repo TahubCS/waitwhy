@@ -221,3 +221,5 @@ Newest line last. Format: `YYYY-MM-DD  ID  status  note`.
 - 2026-10-16  W16  started  Classify, IsRuntimeFrame, YourCodeFrame, BlockedInFrame and TopWaker moved into analysis.h behind SymbolSource; tests/analysis_tests.cpp checks each rule.
 - 2026-10-16  W16  confirmed  CI run #62: unit tests pass on Windows and Linux; smoke test passes.
 - 2026-10-16  W17  started  /W4 /WX on every MSVC command in CI, run-demo.ps1 and CLAUDE.md; _wfopen replaced by _wfopen_s, explicit double conversions in the report.
+- 2026-10-16  W17  confirmed  CI run #63: everything builds with /W4 /WX; tests and smoke test pass.
+- 2026-10-16  W18  started  Dump version 2 written by waitwhy.cpp; dump.h reads versions 1 and 2 and replays them; CI keeps the smoke runs' dumps and reports as the smoke-dumps artifact.

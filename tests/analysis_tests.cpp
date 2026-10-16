@@ -8,7 +8,7 @@
 //   g++ -std=c++17 -Wall -Wextra tests/analysis_tests.cpp -o analysis_tests
 
 #include "../analysis.h"
-#include "dump_reader.h"
+#include "check.h"
 
 #include <string>
 
@@ -45,13 +45,6 @@ class FakeSymbols : public SymbolSource {
   std::map<uint64_t, std::string> names_;
   std::map<uint64_t, std::string> files_;
 };
-
-void ExpectStr(const char* what, const std::string& got, const std::string& want) {
-  const bool ok = got == want;
-  std::printf("  %s %-46s got \"%s\"%s%s%s\n", ok ? "ok  " : "FAIL", what, got.c_str(),
-              ok ? "" : ", expected \"", ok ? "" : want.c_str(), ok ? "" : "\"");
-  if (!ok) ++Failures();
-}
 
 void ExpectCategory(const char* what, Category got, Category want) {
   ExpectStr(what, CategoryLabel(got), CategoryLabel(want));
