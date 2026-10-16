@@ -107,6 +107,16 @@ machine-readable report exists (W34); `tests/golden/` holds a complete expected 
 | 1 | Bad arguments, or the program to watch was not found |
 | 2 | The kernel trace could not be started (not run as Administrator, or tracing is unavailable on this machine) |
 
+## Known-answer scenarios
+
+`scenarios.exe --mode NAME` waits in one well-known way per mode, and CI checks that waitwhy names it: `condvar`, `coldread`, `console`, `pipe`, `socket`, `cpu`, `child`, `lockcpu`, `locksleep`, `lockdisk`, `sleep`. Build it like slowapp and try one:
+
+```powershell
+cl /nologo /EHsc /Od /Zi /std:c++17 scenarios.cpp /Fe:scenarios.exe
+Start-Process .\scenarios.exe -ArgumentList '--mode', 'lockcpu', '--seconds', '15'
+.\waitwhy.exe --name scenarios.exe --seconds 5
+```
+
 ## How it works
 
 1. Starts the Windows kernel trace session ("NT Kernel Logger") with three kinds of events: **context switch** (a thread stops or starts running on a CPU), **ready thread** (one thread wakes another), and **thread start**.

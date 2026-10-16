@@ -22,6 +22,8 @@ jobs:
 
           cl /nologo /W4 /WX /EHsc /Od /Zi /std:c++17 slowapp.cpp /Fe:slowapp.exe
           if ($LASTEXITCODE -ne 0) { throw "slowapp.cpp did not compile" }
+          cl /nologo /W4 /WX /EHsc /Od /Zi /std:c++17 scenarios.cpp /Fe:scenarios.exe
+          if ($LASTEXITCODE -ne 0) { throw "scenarios.cpp did not compile" }
           cl /nologo /W4 /WX /EHsc /O2 /Zi /std:c++17 waitwhy.cpp /Fe:waitwhy.exe
           if ($LASTEXITCODE -ne 0) { throw "waitwhy.cpp did not compile" }
           cl /nologo /W4 /WX /EHsc /O2 /std:c++17 tests\replay_events.cpp /Fe:replay_events.exe
@@ -148,6 +150,51 @@ jobs:
           foreach ($f in $failures) { Write-Host "::error::$f" }
           if ($failures.Count -gt 0) { exit 1 }
           Write-Host 'C8 holds: the bug is reported in the buggy run and not in the fixed run.'
+
+      # W29: one known waiting pattern per scenarios.exe mode, each with its expected finding.
+      # Soft expectations depend on what Windows logs and only warn until confirmed.
+      - name: Scenarios (known answers)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $cases = @(
+            @{ Mode = 'condvar'; Hard = @('\(main\) spent \d+% of the time waiting for another thread or an event to signal it, in scenarios!.*wait_for_result') },
+            @{ Mode = 'coldread'; Hard = @('\(main\) spent \d+% of the time waiting for the disk, in scenarios!.*read_cold_file') },
+            @{ Mode = 'console'; Args = @('--min-ms', '0'); Soft = @('Object     : the console window') },
+            @{ Mode = 'pipe'; Hard = @('\(client\) spent \d+% of the time .*, in scenarios!.*pipe_round_trip');
+               Soft = @('\(client\) spent \d+% of the time waiting for another thread or an event to signal it, in scenarios!.*pipe_round_trip') },
+            @{ Mode = 'socket'; Hard = @('\(client\) spent \d+% of the time waiting for the network, in scenarios!.*socket_round_trip') },
+            @{ Mode = 'cpu'; Hard = @('spent \d+% of the time ready to run but waiting for a free CPU') },
+            @{ Mode = 'child'; Hard = @('\(main\) spent \d+% of the time waiting for another thread or an event to signal it, in scenarios!.*wait_for_child') },
+            @{ Mode = 'lockcpu'; Hard = @('So it holds the lock while it is running') },
+            @{ Mode = 'locksleep'; Hard = @('So it holds the lock while it is sleeping on purpose') },
+            @{ Mode = 'lockdisk'; Hard = @('So it holds the lock while it is waiting for the disk') },
+            @{ Mode = 'sleep'; Hard = @('No thread lost a significant share of its time to blocking') }
+          )
+          $failures = @()
+          foreach ($c in $cases) {
+            $app = Start-Process -FilePath (Resolve-Path .\scenarios.exe) -PassThru -WindowStyle Hidden `
+              -ArgumentList @('--mode', $c.Mode, '--seconds', '12')
+            Start-Sleep -Seconds 3
+            $wwArgs = @('--pid', $app.Id, '--seconds', '5') + @($c.Args | Where-Object { $_ })
+            $text = & .\waitwhy.exe @wwArgs 2>&1 | Out-String
+            $code = $LASTEXITCODE
+            if (-not $app.HasExited) { Stop-Process -Id $app.Id -ErrorAction SilentlyContinue }
+            Write-Host "::group::scenario $($c.Mode) (exit code $code)"
+            Write-Host $text
+            Write-Host '::endgroup::'
+            if ($code -eq 2) { Write-Host "::warning::Kernel tracing is not available; scenario $($c.Mode) skipped."; continue }
+            if ($code -ne 0) { $failures += "$($c.Mode): waitwhy exited with code $code"; continue }
+            foreach ($h in @($c.Hard | Where-Object { $_ })) {
+              if ($text -notmatch $h) { $failures += "$($c.Mode): the report does not match /$h/" }
+            }
+            foreach ($soft in @($c.Soft | Where-Object { $_ })) {
+              if ($text -notmatch $soft) { Write-Host "::warning::$($c.Mode): the report does not match /$soft/ (not required yet)" }
+            }
+          }
+          foreach ($f in $failures) { Write-Host "::error::$f" }
+          if ($failures.Count -gt 0) { exit 1 }
+          Write-Host 'All scenarios gave their expected findings.'
 
       # The smoke runs' event dumps (version 2, W18) and reports, for turning into test fixtures.
       - name: Keep the smoke-test dumps and reports

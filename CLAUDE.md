@@ -38,6 +38,7 @@ was stuck in (DbgHelp + .pdb); and which thread woke it up.
 |---|---|
 | `waitwhy.cpp` | The tool: ETW session, event callbacks, wait bookkeeping, symbolization, report. Moves its analysis core into `analysis.h` (D7, W15). |
 | `slowapp.cpp` | Test target with a deliberate bug: the `saver` thread holds a mutex during a slow disk write, so `main` blocks in `update_frame`. `--fixed` moves the write outside the lock. |
+| `scenarios.cpp` | Known-answer test program (W29): one waiting pattern per `--mode` (condition variable, cold read, console, pipe, socket, CPU contention, child process, lock held while computing/sleeping/writing, sleep only). CI checks each mode's expected finding. |
 | `run-demo.ps1` | Builds both programs (MSVC x64) and runs waitwhy against buggy, then fixed, slowapp. Needs an Administrator shell. |
 | `README.md` | User-facing description, demo instructions, known limitations. |
 | `DESIGN.md` | Proposed architecture (staged pipeline, testable analysis core). A proposal, not approved; `FEATURES.md` wins on any conflict. |
