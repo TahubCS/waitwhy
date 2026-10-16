@@ -37,7 +37,7 @@ Download `waitwhy-VERSION-win-x64.zip` from the [Releases](https://github.com/Ta
 gh attestation verify .\waitwhy-1.0.0-win-x64.zip -R TahubCS/waitwhy   # built by this repository's release workflow
 ```
 
-Or build it yourself with `cl /nologo /W4 /WX /EHsc /O2 /Zi /std:c++17 waitwhy.cpp /Fe:waitwhy.exe` from an x64 Developer PowerShell for Visual Studio. `CHANGELOG.md` lists what each version changed.
+Or build it yourself with `cl /nologo /W4 /WX /EHsc /O2 /Zi /std:c++17 /guard:cf waitwhy.cpp /Fe:waitwhy.exe /link /DEBUG /guard:cf /CETCOMPAT /DYNAMICBASE /HIGHENTROPYVA` from an x64 Developer PowerShell for Visual Studio. `CHANGELOG.md` lists what each version changed.
 
 ## Documentation
 

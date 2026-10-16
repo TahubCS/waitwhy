@@ -74,8 +74,14 @@ class JsonReader {
     Space();
     if (pos_ >= s_.size()) return false;
     const char c = s_[pos_];
-    if (c == '{') return Object(v);
-    if (c == '[') return Array(v);
+    if (c == '{' || c == '[') {
+      // Nesting is bounded, so a hostile file cannot exhaust the stack (W46).
+      if (depth_ >= kMaxDepth) return false;
+      ++depth_;
+      const bool ok = c == '{' ? Object(v) : Array(v);
+      --depth_;
+      return ok;
+    }
     if (c == '"') {
       v->type = JsonValue::Type::String;
       return String(&v->text);
@@ -166,8 +172,10 @@ class JsonReader {
     }
   }
 
+  static constexpr int kMaxDepth = 256;  // waitwhy's own reports nest 6 deep
   const std::string& s_;
   size_t pos_ = 0;
+  int depth_ = 0;
 };
 
 // ---------------------------------------------------------------------------

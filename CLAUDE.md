@@ -62,6 +62,8 @@ was stuck in (DbgHelp + .pdb); and which thread woke it up.
 | `docs/report-schema.json` | JSON Schema of `--format json` (W34), version `waitwhy-report/1`. |
 | `tests/check.h` | Check helpers shared by the tests. |
 | `LICENSE` | MIT (D11). |
+| `SECURITY.md`, `docs/threat-model.md` | How to report security problems; what waitwhy trusts and how each risk is handled (W46). |
+| `tests/fuzz_dump.cpp`, `tests/fuzz_json.cpp` | libFuzzer targets for the dump and JSON readers (W46, D12). Built with clang `-fsanitize=fuzzer,address,undefined` in the Linux CI job only. |
 | `CHANGELOG.md` | What each version changed (W42). Add to `## [Unreleased]` with user-visible changes; a release renames it to the version. |
 | `.github/workflows/release.yml` | W42: a `v*` tag runs every check of `build.yml`, builds with `version.h` from the tag, and publishes a zip with SHA-256 sums and build provenance. Run by hand it is a dry run that keeps the zip as an artifact. Only the user pushes tags. |
 | `ROADMAP.md` | Proposed phased plan towards a tool others can rely on (`R` items, open decisions `X`). A proposal, not approved; `FEATURES.md` wins on any conflict. |
@@ -73,7 +75,7 @@ with `vswhere` + `Enter-VsDevShell -DevCmdArguments '-arch=x64 -host_arch=x64'`)
 
 ```powershell
 cl /nologo /W4 /WX /EHsc /Od /Zi /std:c++17 slowapp.cpp /Fe:slowapp.exe
-cl /nologo /W4 /WX /EHsc /O2 /Zi /std:c++17 waitwhy.cpp /Fe:waitwhy.exe
+cl /nologo /W4 /WX /EHsc /O2 /Zi /std:c++17 /guard:cf waitwhy.cpp /Fe:waitwhy.exe /link /DEBUG /guard:cf /CETCOMPAT /DYNAMICBASE /HIGHENTROPYVA
 ```
 
 - slowapp uses `/Od` so every function keeps its own frame; `/Zi` produces the `.pdb` that

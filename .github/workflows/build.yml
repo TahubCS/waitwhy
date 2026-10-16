@@ -26,8 +26,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "slowapp.cpp did not compile" }
           cl /nologo /W4 /WX /EHsc /Od /Zi /std:c++17 scenarios.cpp /Fe:scenarios.exe
           if ($LASTEXITCODE -ne 0) { throw "scenarios.cpp did not compile" }
-          cl /nologo /W4 /WX /EHsc /O2 /Zi /std:c++17 waitwhy.cpp /Fe:waitwhy.exe
+          # W46: control-flow guard, CET shadow stacks, ASLR with high entropy.
+          cl /nologo /W4 /WX /EHsc /O2 /Zi /std:c++17 /guard:cf waitwhy.cpp /Fe:waitwhy.exe /link /DEBUG /guard:cf /CETCOMPAT /DYNAMICBASE /HIGHENTROPYVA
           if ($LASTEXITCODE -ne 0) { throw "waitwhy.cpp did not compile" }
+          $headers = dumpbin /headers waitwhy.exe | Out-String
+          if ($headers -notmatch 'Guard') { Write-Host $headers; throw "waitwhy.exe is not built with control-flow guard" }
+          if ($headers -notmatch 'CET compatible') { Write-Host "::warning::dumpbin does not show waitwhy.exe as CET compatible." }
+          if ($headers -notmatch 'High Entropy Virtual Addresses') { throw "waitwhy.exe has no high-entropy ASLR" }
           cl /nologo /W4 /WX /EHsc /O2 /std:c++17 tests\replay_events.cpp /Fe:replay_events.exe
           if ($LASTEXITCODE -ne 0) { throw "tests\replay_events.cpp did not compile" }
           cl /nologo /W4 /WX /EHsc /O2 /std:c++17 /DWAITWHY_NO_MAIN tests\decode_tests.cpp /Fe:decode_tests.exe
@@ -437,3 +442,55 @@ jobs:
             ./replay_events docs/traces/buggy-64mb-events.txt
             echo "::endgroup::"
           done
+
+  # W46 (D12): the portable code under AddressSanitizer and UndefinedBehaviorSanitizer, and
+  # libFuzzer on the readers of files that come from other machines (dumps, JSON reports).
+  # These tools run in CI only; nothing of them is linked into waitwhy.
+  sanitizers-and-fuzzing:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sanitizer and fuzzer runtimes
+        run: |
+          echo 'int main() { return 0; }' > probe.cpp
+          if ! clang++ -fsanitize=address,undefined probe.cpp -o probe 2>/dev/null ||
+             ! clang++ -fsanitize=fuzzer-no-link probe.cpp -o probe 2>/dev/null; then
+            major=$(clang++ --version | sed -n 's/.*clang version \([0-9]*\).*/\1/p' | head -1)
+            sudo apt-get update -q && sudo apt-get install -y -q "libclang-rt-${major}-dev"
+          fi
+          clang++ --version | head -1
+
+      - name: Tests under ASan and UBSan
+        run: |
+          set -e
+          flags="-std=c++17 -g -O1 -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+          clang++ $flags tests/analysis_tests.cpp -o analysis_tests && ./analysis_tests
+          clang++ $flags tests/golden_tests.cpp -o golden_tests && ./golden_tests tests/golden
+          clang++ $flags tests/replay_events.cpp -o replay_events && ./replay_events docs/traces/buggy-64mb-events.txt
+
+      - name: Fuzz the dump and JSON readers (60 s each)
+        run: |
+          set -e
+          flags="-std=c++17 -g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all"
+          clang++ $flags tests/fuzz_dump.cpp -o fuzz_dump
+          clang++ $flags tests/fuzz_json.cpp -o fuzz_json
+          mkdir -p corpus-dump corpus-json
+          cp tests/golden/*.events.txt corpus-dump/
+          head -c 60000 docs/traces/buggy-64mb-events.txt > corpus-dump/recorded-start.txt
+          cp tests/golden/*.report.json corpus-json/
+          ./fuzz_dump -max_total_time=60 -max_len=65536 -timeout=10 -rss_limit_mb=2048 corpus-dump
+          ./fuzz_json -max_total_time=60 -max_len=65536 -timeout=10 -rss_limit_mb=2048 corpus-json
+
+      - name: Keep the inputs that failed
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-failures
+          path: |
+            crash-*
+            leak-*
+            timeout-*
+            oom-*
+            slow-unit-*
+          if-no-files-found: ignore

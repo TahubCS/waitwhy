@@ -44,7 +44,7 @@ if ($env:VSCMD_ARG_TGT_ARCH -and $env:VSCMD_ARG_TGT_ARCH -ne 'x64') {
 Write-Host "Building slowapp.exe and waitwhy.exe..." -ForegroundColor Cyan
 cl /nologo /W4 /WX /EHsc /Od /Zi /std:c++17 slowapp.cpp /Fe:slowapp.exe | Out-Host
 if ($LASTEXITCODE -ne 0) { throw "slowapp.cpp did not compile" }
-cl /nologo /W4 /WX /EHsc /O2 /Zi /std:c++17 waitwhy.cpp /Fe:waitwhy.exe | Out-Host
+cl /nologo /W4 /WX /EHsc /O2 /Zi /std:c++17 /guard:cf waitwhy.cpp /Fe:waitwhy.exe /link /DEBUG /guard:cf /CETCOMPAT /DYNAMICBASE /HIGHENTROPYVA | Out-Host
 if ($LASTEXITCODE -ne 0) { throw "waitwhy.cpp did not compile" }
 
 # Microsoft's redistributable dbghelp.dll and symsrv.dll, when the Windows SDK has them, let
