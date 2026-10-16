@@ -65,6 +65,8 @@ To print the report again later, on any machine and without Administrator rights
 .\waitwhy.exe --from-dump dump.txt
 ```
 
+If the program exits while it is being watched, waitwhy still names its functions: the trace records every module the program had loaded, and waitwhy loads them from disk at the same addresses.
+
 Function names only show up for programs that have `.pdb` symbol files next to them (your own debug or `/Zi` builds). For other programs you will see Windows function names (for example `KERNELBASE!ReadFile`) and addresses.
 
 ## How much to trust a report

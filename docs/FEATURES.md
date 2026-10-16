@@ -239,3 +239,4 @@ Newest line last. Format: `YYYY-MM-DD  ID  status  note`.
 - 2026-10-16  W24  confirmed  CI run #71: golden data-quality section matches; smoke test and rebuilt reports pass.
 - 2026-10-16  W25  started  Each thread keeps its running, ready and waiting intervals (all threads together at most 2^20); lock and other-thread findings show what the waking thread did during exactly those waits, replacing "most likely".
 - 2026-10-16  W25  confirmed  CI run #72: buggy run says saver spent 94% of main's lock waits waiting for the disk in write_settings_to_disk; fixed run has no lock finding.
+- 2026-10-16  W26  started  Image load and rundown events record the program's modules (IMAGE lines in dumps); when the program exits during the trace, DbgHelp loads them at their recorded bases; a .pdb beside the program that is not used is named in the data-quality section. CI smoke gains a run where slowapp exits after about 3 s.

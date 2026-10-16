@@ -17,7 +17,9 @@
 //   THREAD     ts kind pid tid                     kind: 0 created, 1 existing, 2 ended
 //   END        ts contextSwitches stacksOn eventsLost buffersLost   tracing stopped: end of window
 //   SNAPSHOT   tid frames=0x..,0x..                stack of a thread still blocked (W7)
-//   NAMES      symbolsOk                           the program could be opened for names
+//   NAMES      symbolsOk fromTrace                 names found; fromTrace: from the IMAGE lines (W26)
+//   PDB        file=<path>                         a .pdb beside the program (W26)
+//   IMAGE      ts base size name=<path>            a module the program had loaded (W26)
 //   EXE        name=<file name of the program>
 //   SYMBOL     addr name=<module!function>         every address in the report's stacks
 //   SOURCE     addr file=<source file, lower case>
@@ -116,6 +118,8 @@ struct DumpInfo {
   bool ended = false;  // an END line was read
   bool stacksOn = true;
   bool symbolsOk = true;
+  bool namesFromTrace = false;
+  std::string pdbNextToExe;
   uint64_t eventsLost = 0;
   uint64_t buffersLost = 0;
   std::string exeFile;
@@ -188,6 +192,9 @@ class DumpReplay {
         info.buffersLost = l.Get("buffersLost");
       } else if (l.kind == "NAMES") {
         info.symbolsOk = l.Get("symbolsOk", 1) != 0;
+        info.namesFromTrace = l.Get("fromTrace", 0) != 0;
+      } else if (l.kind == "PDB" && l.Has("file")) {
+        info.pdbNextToExe = l.text.at("file");
       } else if (l.kind == "EXE" && l.Has("name")) {
         info.exeFile = l.text.at("name");
       } else if (l.kind == "THREADNAME" && l.Has("name")) {

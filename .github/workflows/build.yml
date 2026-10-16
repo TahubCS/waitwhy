@@ -78,6 +78,8 @@ jobs:
 
           $buggy = Watch-Slowapp 'buggy' @()
           $fixed = Watch-Slowapp 'fixed' @('--fixed')
+          # W26: slowapp exits about 3 s into the 8 s watch; names must come from the trace.
+          $exited = Watch-Slowapp 'exited' @('--seconds', '6')
 
           # Function names can carry a namespace, e.g. slowapp!`anonymous namespace'::update_frame.
           # In the fixed run saver still waits on the disk, which is fine; only the lock must go.
@@ -94,6 +96,9 @@ jobs:
           if ($fixed -match 'waiting for a lock that another thread was holding') {
             $failures += 'Fixed run: a thread is still reported as blocked on a lock.'
           }
+          if ($exited -notmatch 'the program exited during the trace' -or $exited -notmatch 'slowapp!.*update_frame') {
+            $failures += 'Exited run: function names were not found from the modules recorded in the trace.'
+          }
 
           # W19: the report rebuilt from each run's dump must equal the live report.
           function Get-ReportPart([string]$Text) {
@@ -101,7 +106,8 @@ jobs:
             if ($i -lt 0) { return '' }
             return ($Text.Substring($i) -replace "`r", '').TrimEnd()
           }
-          foreach ($run in @(@{ Label = 'buggy'; Live = $buggy }, @{ Label = 'fixed'; Live = $fixed })) {
+          foreach ($run in @(@{ Label = 'buggy'; Live = $buggy }, @{ Label = 'fixed'; Live = $fixed },
+                             @{ Label = 'exited'; Live = $exited })) {
             $offline = & .\waitwhy.exe --from-dump "$($run.Label)-events.txt" 2>&1 | Out-String
             if ($LASTEXITCODE -ne 0 -or (Get-ReportPart $offline) -ne (Get-ReportPart $run.Live)) {
               Write-Host "===== report rebuilt from $($run.Label)-events.txt ====="
@@ -125,6 +131,8 @@ jobs:
             buggy-report.txt
             fixed-events.txt
             fixed-report.txt
+            exited-events.txt
+            exited-report.txt
           if-no-files-found: ignore
 
   # The analysis core (analysis.h) makes no Windows calls (D7), so its tests also run here, with

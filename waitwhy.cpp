@@ -92,6 +92,8 @@ const GUID kThreadGuid = {
     0x3d6fa8d1, 0xfe05, 0x11d0, {0x9d, 0xda, 0x00, 0xc0, 0x4f, 0xd7, 0xba, 0x7c}};
 const GUID kStackWalkGuid = {
     0xdef2fe46, 0x7bd6, 0x4b80, {0xbd, 0x94, 0xf5, 0x7f, 0xe2, 0x0d, 0x0c, 0xe3}};
+const GUID kImageGuid = {
+    0x2cb15d1d, 0x5fc1, 0x11d2, {0xab, 0xe1, 0x00, 0xa0, 0xc9, 0x11, 0xf5, 0x18}};
 
 // Event types (opcodes) inside the kernel's Thread event class.
 constexpr UCHAR kOpThreadStart = 1;
@@ -100,6 +102,8 @@ constexpr UCHAR kOpThreadDcStart = 3;  // "already running when the trace starte
 constexpr UCHAR kOpCSwitch = 36;
 constexpr UCHAR kOpReadyThread = 50;
 constexpr UCHAR kOpStackWalk = 32;     // inside the StackWalk class
+constexpr UCHAR kOpImageDcStart = 3;   // inside the Image class: loaded when the trace started
+constexpr UCHAR kOpImageLoad = 10;     // inside the Image class: loaded during the trace
 
 constexpr int kTraceStackTracingInfo = 3;  // TRACE_INFO_CLASS value
 
@@ -136,6 +140,17 @@ struct SessionProps {
   EVENT_TRACE_PROPERTIES props;
   wchar_t loggerName[64];
 };
+
+// UTF-16 to UTF-8.
+std::string Narrow(const std::wstring& w) {
+  if (w.empty()) return {};
+  int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), static_cast<int>(w.size()), nullptr, 0,
+                              nullptr, nullptr);
+  std::string s(static_cast<size_t>(n), '\0');
+  WideCharToMultiByte(CP_UTF8, 0, w.c_str(), static_cast<int>(w.size()), &s[0], n, nullptr,
+                      nullptr);
+  return s;
+}
 
 // ---------------------------------------------------------------------------
 // Decoding: kernel events -> typed events for the analysis core (analysis.h)
@@ -261,6 +276,45 @@ void OnStackWalk(const EVENT_RECORD* ev) {
   g_analysis.OnStack(e);
 }
 
+// A module the program had loaded, from the kernel's image events (W26). With these, function
+// names can still be found after the program has exited.
+struct ImageInfo {
+  uint64_t base = 0;
+  uint64_t size = 0;
+  std::wstring path;  // as the kernel names it, e.g. \Device\HarddiskVolume3\...\ntdll.dll
+};
+std::vector<ImageInfo> g_images;
+
+void OnImage(const EVENT_RECORD* ev) {
+  // Image_Load (versions 2 and 3): ImageBase, ImageSize (pointers), ProcessId, ImageCheckSum,
+  // TimeDateStamp, a 32-bit field, DefaultBase (pointer), four reserved 32-bit fields, then the
+  // file name as a null-terminated UTF-16 string.
+  const size_t ptr = (ev->EventHeader.Flags & EVENT_HEADER_FLAG_64_BIT_HEADER) ? 8 : 4;
+  const size_t nameAt = 3 * ptr + 32;
+  if (ev->UserDataLength < nameAt + sizeof(wchar_t)) return;
+  const auto* p = static_cast<const uint8_t*>(ev->UserData);
+  uint32_t pid = 0;
+  std::memcpy(&pid, p + 2 * ptr, sizeof pid);
+  if (pid != g_analysis.pid) return;
+  ImageInfo image;
+  std::memcpy(&image.base, p, ptr);
+  std::memcpy(&image.size, p + ptr, ptr);
+  for (size_t at = nameAt; at + sizeof(wchar_t) <= ev->UserDataLength; at += sizeof(wchar_t)) {
+    wchar_t ch;
+    std::memcpy(&ch, p + at, sizeof ch);
+    if (ch == L'\0') break;
+    image.path += ch;
+  }
+  if (g_dump) {
+    std::fprintf(g_dump, "IMAGE ts=%llu base=0x%llx size=0x%llx name=%s\n",
+                 static_cast<unsigned long long>(ev->EventHeader.TimeStamp.QuadPart),
+                 static_cast<unsigned long long>(image.base),
+                 static_cast<unsigned long long>(image.size), Narrow(image.path).c_str());
+    ++g_dumpLines;
+  }
+  g_images.push_back(std::move(image));
+}
+
 void WINAPI OnEvent(PEVENT_RECORD ev) {
   const EVENT_HEADER& h = ev->EventHeader;
   const UCHAR op = h.EventDescriptor.Opcode;
@@ -278,6 +332,8 @@ void WINAPI OnEvent(PEVENT_RECORD ev) {
     }
   } else if (IsEqualGUID(h.ProviderId, kStackWalkGuid) && op == kOpStackWalk) {
     OnStackWalk(ev);
+  } else if (IsEqualGUID(h.ProviderId, kImageGuid) && (op == kOpImageLoad || op == kOpImageDcStart)) {
+    OnImage(ev);
   }
 }
 
@@ -294,7 +350,8 @@ void FillProps(SessionProps& sp, bool forStart) {
   sp.props.Wnode.ClientContext = 1;  // timestamps from QueryPerformanceCounter
   sp.props.Wnode.Flags = WNODE_FLAG_TRACED_GUID;
   sp.props.EnableFlags =
-      EVENT_TRACE_FLAG_CSWITCH | EVENT_TRACE_FLAG_DISPATCHER | EVENT_TRACE_FLAG_THREAD;
+      EVENT_TRACE_FLAG_CSWITCH | EVENT_TRACE_FLAG_DISPATCHER | EVENT_TRACE_FLAG_THREAD |
+      EVENT_TRACE_FLAG_IMAGE_LOAD;
   sp.props.LogFileMode = EVENT_TRACE_REAL_TIME_MODE;
   sp.props.BufferSize = 256;  // KB per buffer; context switches are very frequent
   sp.props.MinimumBuffers = 128;
@@ -345,16 +402,6 @@ BOOL WINAPI OnCtrl(DWORD) {
 // ---------------------------------------------------------------------------
 // Process, thread and symbol helpers
 // ---------------------------------------------------------------------------
-
-std::string Narrow(const std::wstring& w) {
-  if (w.empty()) return {};
-  int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), static_cast<int>(w.size()), nullptr, 0,
-                              nullptr, nullptr);
-  std::string s(static_cast<size_t>(n), '\0');
-  WideCharToMultiByte(CP_UTF8, 0, w.c_str(), static_cast<int>(w.size()), &s[0], n, nullptr,
-                      nullptr);
-  return s;
-}
 
 bool FindProcessByName(const std::wstring& name, uint32_t* pid) {
   HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -466,8 +513,58 @@ void SnapshotThreadsStillBlocked() {
   CloseHandle(proc);
 }
 
+// "\Device\HarddiskVolume3\x\y.dll" -> "C:\x\y.dll", "\SystemRoot\..." -> "C:\Windows\...".
+std::wstring DosPath(const std::wstring& path) {
+  if (path.rfind(L"\\??\\", 0) == 0) return path.substr(4);
+  if (path.rfind(L"\\SystemRoot\\", 0) == 0) {
+    wchar_t windows[MAX_PATH];
+    const UINT n = GetWindowsDirectoryW(windows, MAX_PATH);
+    if (n > 0 && n < MAX_PATH) return std::wstring(windows, n) + path.substr(11);
+  }
+  for (wchar_t drive = L'A'; drive <= L'Z'; ++drive) {
+    const wchar_t name[3] = {drive, L':', L'\0'};
+    wchar_t device[MAX_PATH];
+    if (!QueryDosDeviceW(name, device, MAX_PATH)) continue;
+    const std::wstring prefix = std::wstring(device) + L"\\";
+    if (path.size() > prefix.size() && _wcsnicmp(path.c_str(), prefix.c_str(), prefix.size()) == 0)
+      return std::wstring(name) + path.substr(prefix.size() - 1);
+  }
+  return path;
+}
+
 class Symbolizer : public SymbolSource {
  public:
+  // When the program has exited: load the modules it had loaded, at the addresses they had,
+  // from the kernel's image events (W26).
+  bool InitFromImages(const std::vector<ImageInfo>& images) {
+    if (images.empty()) return false;
+    proc_ = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(0x57a17));  // any unique value
+    ownsHandle_ = false;
+    SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_FAIL_CRITICAL_ERRORS |
+                  SYMOPT_LOAD_LINES);
+    if (!SymInitializeW(proc_, nullptr, FALSE)) return false;
+    ok_ = true;
+    std::wstring searchPath;
+    for (const ImageInfo& image : images) {
+      const std::wstring dos = DosPath(image.path);
+      const size_t slash = dos.find_last_of(L"\\/");
+      const std::wstring file = slash == std::wstring::npos ? dos : dos.substr(slash + 1);
+      if (file.size() > 4 && _wcsicmp(file.c_str() + file.size() - 4, L".exe") == 0 && exeFile_.empty()) {
+        exeFile_ = Narrow(file);
+        exePath_ = dos;
+        exeModule_ = Lower(Narrow(file.substr(0, file.size() - 4)));
+        if (slash != std::wstring::npos) searchPath = dos.substr(0, slash);
+      }
+    }
+    if (!searchPath.empty()) SymSetSearchPathW(proc_, searchPath.c_str());  // the program's .pdb
+    for (const ImageInfo& image : images)
+      SymLoadModuleExW(proc_, nullptr, DosPath(image.path).c_str(), nullptr, image.base,
+                       static_cast<DWORD>(image.size), nullptr, 0);
+    fromImages_ = true;
+    return true;
+  }
+  bool FromImages() const { return fromImages_; }
+
   bool Init(uint32_t pid) {
     proc_ = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid);
     if (!proc_) return false;
@@ -480,15 +577,31 @@ class Symbolizer : public SymbolSource {
       size_t dot = file.find_last_of(L'.');
       exeModule_ = Lower(Narrow(dot == std::wstring::npos ? file : file.substr(0, dot)));
       exeFile_ = Narrow(file);
+      exePath_ = p;
     }
     SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_FAIL_CRITICAL_ERRORS |
                   SYMOPT_LOAD_LINES);
     ok_ = SymInitializeW(proc_, nullptr, TRUE) != FALSE;
+    if (!ok_) {
+      CloseHandle(proc_);
+      proc_ = nullptr;
+    }
     return ok_;
+  }
+
+  // A .pdb with the program's name next to it, if there is one (W26): when the report finds
+  // no full names for the program anyway, that .pdb does not match the .exe.
+  std::string PdbNextToExe() const {
+    const size_t dot = exePath_.find_last_of(L'.');
+    if (exePath_.empty() || dot == std::wstring::npos) return {};
+    const std::wstring pdb = exePath_.substr(0, dot) + L".pdb";
+    const DWORD attributes = GetFileAttributesW(pdb.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY)) return {};
+    return Narrow(pdb);
   }
   ~Symbolizer() {
     if (ok_) SymCleanup(proc_);
-    if (proc_) CloseHandle(proc_);
+    if (proc_ && ownsHandle_) CloseHandle(proc_);
   }
 
   // Returns "module!function", or "module!0x1234" when no name is available.
@@ -553,6 +666,9 @@ class Symbolizer : public SymbolSource {
 
  private:
   HANDLE proc_ = nullptr;
+  bool ownsHandle_ = true;
+  std::wstring exePath_;
+  bool fromImages_ = false;
   bool ok_ = false;
   std::string exeModule_;
   std::string exeFile_;
@@ -577,7 +693,9 @@ class Symbolizer : public SymbolSource {
 // dump alone: the program's file, each address in a wait's stack, and the thread labels.
 void WriteDumpNames(FILE* out, Symbolizer& sym, bool symbolsOk) {
   const Analyzer& an = g_analysis;
-  std::fprintf(out, "NAMES symbolsOk=%d\n", symbolsOk ? 1 : 0);
+  std::fprintf(out, "NAMES symbolsOk=%d fromTrace=%d\n", symbolsOk ? 1 : 0, sym.FromImages() ? 1 : 0);
+  const std::string pdb = sym.PdbNextToExe();
+  if (!pdb.empty()) std::fprintf(out, "PDB file=%s\n", pdb.c_str());
   if (!sym.ExeFile().empty()) std::fprintf(out, "EXE name=%s\n", sym.ExeFile().c_str());
   std::map<uint64_t, bool> addrs;  // sorted, so dumps of the same run compare equal
   for (const auto& [key, b] : an.buckets)
@@ -617,6 +735,8 @@ void PrintReport(double ticksPerSecond, ReportOptions opt, const SessionProps& s
   opt.stacksOn = stacksOn;
   opt.symbolsOk = symbolsOk;
   opt.exeFile = sym.ExeFile();
+  opt.namesFromTrace = sym.FromImages();
+  opt.pdbNextToExe = sym.PdbNextToExe();
   const Report report = BuildReport(g_analysis, sym, opt, ThreadLabel);
   std::fputs(RenderText(report).c_str(), stdout);
 }
@@ -643,6 +763,8 @@ int ReportFromDump(const std::wstring& path, ReportOptions opt) {
   opt.stacksOn = info.stacksOn;
   opt.symbolsOk = info.symbolsOk;
   opt.exeFile = info.exeFile;
+  opt.namesFromTrace = info.namesFromTrace;
+  opt.pdbNextToExe = info.pdbNextToExe;
   auto name = [&info](uint32_t tid) {
     auto it = info.threadNames.find(tid);
     return it != info.threadNames.end() ? it->second : "Thread " + std::to_string(tid);
@@ -794,6 +916,7 @@ int wmain(int argc, wchar_t** argv) {
   const uint64_t deadline = g_analysis.firstTs + static_cast<uint64_t>(seconds) *
                                                      static_cast<uint64_t>(freq.QuadPart);
   uint64_t nextDot = g_analysis.firstTs + static_cast<uint64_t>(freq.QuadPart);
+  bool programExited = false;
   for (;;) {
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
@@ -809,6 +932,7 @@ int wmain(int argc, wchar_t** argv) {
         uint64_t{100}, untilMs * 1000 / static_cast<uint64_t>(freq.QuadPart)));
     if (WaitForSingleObject(target, waitMs) == WAIT_OBJECT_0) {
       std::printf("\nThe program exited while being watched.");
+      programExited = true;
       break;
     }
   }
@@ -832,8 +956,9 @@ int wmain(int argc, wchar_t** argv) {
 
   SnapshotThreadsStillBlocked();
   g_analysis.FlushAtEnd();
+  // A program that exited can no longer be asked for its modules; the trace recorded them.
   Symbolizer sym;
-  const bool symbolsOk = sym.Init(pid);
+  const bool symbolsOk = (!programExited && sym.Init(pid)) || sym.InitFromImages(g_images);
   if (g_dump) {
     WriteDumpNames(g_dump, sym, symbolsOk);
     std::fclose(g_dump);
