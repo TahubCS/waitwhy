@@ -253,6 +253,27 @@ void CheckWindowAndLifetime() {
   ExpectEq("lifetime of a thread never seen is the window", an.Lifetime(99), 1000);
 }
 
+// W23: wait durations on a log scale with four steps per doubling.
+void CheckDurationHistogram() {
+  std::printf("Wait duration histogram (W23)\n");
+  ExpectEq("step of 0", DurationStep(0), 0);
+  ExpectEq("step of 1", DurationStep(1), 1);
+  ExpectEq("largest value in the step of 3", DurationStepMax(DurationStep(3)), 3);
+  ExpectEq("step of 100 (96..111)", DurationStep(100), 27);
+  ExpectEq("largest value in step 27", DurationStepMax(27), 111);
+  DurationHistogram h;
+  for (uint64_t d = 1; d <= 100; ++d) h.Add(d);
+  ExpectEq("count", h.count, 100);
+  ExpectEq("longest", h.longest, 100);
+  ExpectEq("95% at most (step 80..95)", h.Quantile(0.95), 95);
+  ExpectEq("100% is the longest", h.Quantile(1.0), 100);
+  DurationHistogram merged;
+  merged.Add(h);
+  merged.Add(5000);
+  ExpectEq("merged longest", merged.longest, 5000);
+  ExpectEq("merged count", merged.count, 101);
+}
+
 }  // namespace
 
 int main() {
@@ -266,6 +287,7 @@ int main() {
   CheckTopWakerAndDuration();
   CheckReadySplitsWaitTime();
   CheckWindowAndLifetime();
+  CheckDurationHistogram();
   std::printf(Failures() ? "%d check(s) failed.\n" : "All checks passed.\n", Failures());
   return Failures() ? 1 : 0;
 }

@@ -232,3 +232,5 @@ Newest line last. Format: `YYYY-MM-DD  ID  status  note`.
 - 2026-10-16  W20  confirmed  CI run #68: "watched for 8.01 s" for --seconds 8 (was 9.06 s); no share above 100%.
 - 2026-10-16  W21  confirmed  CI run #68: the idle thread-pool worker is one line under the thread table in both runs and no longer a finding.
 - 2026-10-16  W22  started  Rows group waits by (thread, category, function in the program's code); blocking functions listed with shares; dominant known wait reason shown; --min-ms (default 10) and --top leftovers counted on one line.
+- 2026-10-16  W22  confirmed  CI run #69: golden report with grouped rows matches; smoke test and rebuilt reports pass.
+- 2026-10-16  W23  started  Buckets keep a log-scale duration histogram; rows show the longest wait and, from 20 waits, a 95th percentile; a lock, disk, network or page-fault group whose longest wait reaches --stall-ms (default 50) is a finding even under 10%.

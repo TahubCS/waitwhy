@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -118,12 +119,59 @@ struct ThreadState {
   uint64_t endedAt = 0;
 };
 
+// Wait durations on a log scale with four steps per doubling (W23), so a percentile is known to
+// within about 20% while memory stays small: one entry per step that occurs.
+inline uint16_t DurationStep(uint64_t ticks) {
+  if (ticks == 0) return 0;
+  int e = 63;
+  while (!(ticks >> e)) --e;
+  const unsigned sub = e >= 2 ? static_cast<unsigned>((ticks >> (e - 2)) & 3) : 0;
+  return static_cast<uint16_t>(1 + e * 4 + static_cast<int>(sub));
+}
+
+// The longest duration that falls into `step`.
+inline uint64_t DurationStepMax(uint16_t step) {
+  if (step == 0) return 0;
+  const int e = (step - 1) / 4;
+  const uint64_t sub = static_cast<uint64_t>((step - 1) % 4);
+  if (e < 2) return (uint64_t{2} << e) - 1;
+  return ((5 + sub) << (e - 2)) - 1;
+}
+
+struct DurationHistogram {
+  std::map<uint16_t, uint32_t> steps;
+  uint64_t longest = 0;
+  uint64_t count = 0;
+
+  void Add(uint64_t ticks) {
+    ++steps[DurationStep(ticks)];
+    longest = (std::max)(longest, ticks);
+    ++count;
+  }
+  void Add(const DurationHistogram& other) {
+    for (const auto& [step, n] : other.steps) steps[step] += n;
+    longest = (std::max)(longest, other.longest);
+    count += other.count;
+  }
+  // At most this long for a share `q` of the waits (e.g. 0.95), rounded up to its step.
+  uint64_t Quantile(double q) const {
+    const auto rank = static_cast<uint64_t>(std::ceil(q * static_cast<double>(count)));
+    uint64_t seen = 0;
+    for (const auto& [step, n] : steps) {
+      seen += n;
+      if (seen >= rank) return (std::min)(DurationStepMax(step), longest);
+    }
+    return longest;
+  }
+};
+
 // All waits of one thread that share the same call stack and wait reason.
 struct Bucket {
   uint32_t tid = 0;
   int8_t reason = 0;
   uint64_t ticks = 0;
   uint32_t count = 0;
+  DurationHistogram durations;  // each wait's own length (W23)
   bool stillWaitingAtEnd = false;
   std::vector<uint64_t> stack;
   std::map<uint32_t, uint64_t> wakers;  // waking thread id -> wait time it ended
@@ -357,6 +405,7 @@ class Analyzer {
     }
     b.ticks += d;
     b.count += 1;
+    b.durations.Add(d);
     if (stillWaiting) b.stillWaitingAtEnd = true;
     if (w.wokenBy != kUnknownThread) b.wakers[w.wokenBy] += d;
   }

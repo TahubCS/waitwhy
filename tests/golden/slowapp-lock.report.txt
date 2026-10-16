@@ -14,6 +14,7 @@ Biggest waits
 
   #1  Thread 3 (ticker)  waited 10.00 s (100% of the time) over 2 wait(s), still waiting at the end
       Waiting on : an intentional sleep or timer
+      Longest    : 5.00 s
       Your code  : slowapp!`anonymous namespace'::ticker_thread
       Blocked in : KERNELBASE!SleepEx
       Woken by   : the system (a timer or finished I/O)
@@ -21,6 +22,7 @@ Biggest waits
 
   #2  Thread 2 (saver)  waited 6.99 s (70% of the time) over 1 wait(s), still waiting at the end
       Waiting on : an intentional sleep or timer
+      Longest    : 6.99 s
       Your code  : slowapp!`anonymous namespace'::saver_thread
       Blocked in : KERNELBASE!SleepEx
       Woken by   : unknown
@@ -28,6 +30,7 @@ Biggest waits
 
   #3  Thread 1 (main)  waited 6.98 s (70% of the time) over 1 wait(s), still waiting at the end
       Waiting on : an intentional sleep or timer
+      Longest    : 6.98 s
       Your code  : slowapp!main
       Blocked in : KERNELBASE!SleepEx
       Woken by   : unknown
@@ -35,6 +38,7 @@ Biggest waits
 
   #4  Thread 1 (main)  waited 3.01 s (30% of the time) over 1 wait(s)
       Waiting on : a lock held by another thread
+      Longest    : 3.01 s
       Your code  : slowapp!`anonymous namespace'::update_frame
       Blocked in : ntdll!RtlSleepConditionVariableSRW
       Woken by   : Thread 2 (saver)
@@ -42,6 +46,7 @@ Biggest waits
 
   #5  Thread 2 (saver)  waited 3.00 s (30% of the time) over 2 wait(s)
       Waiting on : the disk (file read/write/flush)
+      Longest    : 2.80 s
       Your code  : slowapp!`anonymous namespace'::write_settings_to_disk
       Blocked in : KERNELBASE!WriteFile (93%), KERNELBASE!FlushFileBuffers (7%)
       Woken by   : the system (a timer or finished I/O)
@@ -51,7 +56,9 @@ Biggest waits
 
 What this means
   * Thread 2 (saver) spent 30% of the time waiting for the disk, in slowapp!`anonymous namespace'::write_settings_to_disk.
+    Its longest single wait was 2.80 s.
   * Thread 1 (main) spent 30% of the time waiting for a lock that another thread was holding, in slowapp!`anonymous namespace'::update_frame.
+    Its longest single wait was 3.01 s.
     The lock was released by Thread 2 (saver), which spends its time waiting for the disk, in slowapp!`anonymous namespace'::write_settings_to_disk.
     It is most likely holding the lock during that slow work. Move the
     slow work outside the lock (copy the data first, then do the work).

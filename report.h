@@ -25,6 +25,7 @@ struct ReportOptions {
   double ticksPerSecond = 1.0;
   size_t topN = 6;
   double minMs = 10.0;  // smaller groups of waits are counted, not shown (W22)
+  double stallMs = 50.0;  // a single wait this long is a finding on its own (W23)
   uint64_t eventsLost = 0;
   uint64_t buffersLost = 0;
   bool stacksOn = true;
@@ -50,6 +51,8 @@ struct WaitRow {
   double pct = 0;
   uint32_t count = 0;
   bool stillWaitingAtEnd = false;
+  double longestSeconds = 0;  // the longest single wait (W23)
+  double p95Seconds = -1;     // 95% of the waits took at most this; -1 below 20 waits
   Category category = Category::Other;
   std::string yourCode;
   // The system functions it was blocked in, with their share of the row's wait time, largest
@@ -68,6 +71,9 @@ struct Finding {
   double pct = 0;
   Category category = Category::Other;  // Kind::Wait
   std::string yourCode;                 // Kind::Wait
+  double longestSeconds = 0;            // Kind::Wait: the longest single wait
+  bool longWait = false;                // Kind::Wait: the longest reached stallMs (W23)
+  bool onlyLongWait = false;            // Kind::Wait: a finding only because of it
   // For a lock wait: the program thread that released the lock and what it spends its time on.
   bool hasReleaser = false;
   std::string releaser;
@@ -111,6 +117,7 @@ struct WaitGroup {
   uint32_t count = 0;
   bool stillWaitingAtEnd = false;
   bool anyStack = false;
+  DurationHistogram durations;
   std::map<uint32_t, uint64_t> wakers;
   std::map<int8_t, uint64_t> reasons;
   std::map<std::string, uint64_t> blockedIn;
@@ -215,6 +222,7 @@ inline Report BuildReport(const Analyzer& an, SymbolSource& sym, const ReportOpt
     g.count += b.count;
     g.stillWaitingAtEnd = g.stillWaitingAtEnd || b.stillWaitingAtEnd;
     g.anyStack = g.anyStack || !b.stack.empty();
+    g.durations.Add(b.durations);
     for (const auto& [waker, t] : b.wakers) g.wakers[waker] += t;
     g.reasons[b.reason] += b.ticks;
     g.blockedIn[BlockedInFrame(b, sym)] += b.ticks;
@@ -239,6 +247,8 @@ inline Report BuildReport(const Analyzer& an, SymbolSource& sym, const ReportOpt
     w.pct = pct(g->tid, g->ticks);
     w.count = g->count;
     w.stillWaitingAtEnd = g->stillWaitingAtEnd;
+    w.longestSeconds = secs(g->durations.longest);
+    if (g->durations.count >= 20) w.p95Seconds = secs(g->durations.Quantile(0.95));
     w.category = g->category;
     w.yourCode = g->yourCode;
     for (const auto& [fn, t] : g->blockedIn)
@@ -258,13 +268,23 @@ inline Report BuildReport(const Analyzer& an, SymbolSource& sym, const ReportOpt
     for (const WaitGroup* g : groups) {
       if (g->tid != tid) continue;
       const Category c = g->category;
-      if (c == Category::Sleep || pct(tid, g->ticks) < 10.0) continue;
+      if (c == Category::Sleep) continue;
+      // A single long wait freezes the thread even when its share of the time is small, e.g. a
+      // UI thread that misses frames (W23). Waits for another thread are left out of this:
+      // workers waiting for jobs do that by design.
+      const bool longWait = secs(g->durations.longest) * 1000.0 >= opt.stallMs &&
+                            c != Category::Other && c != Category::OtherThread;
+      const bool bigShare = pct(tid, g->ticks) >= 10.0;
+      if (!bigShare && !longWait) continue;
       Finding f;
       f.tid = tid;
       f.thread = name(tid);
       f.pct = pct(tid, g->ticks);
       f.category = c;
       f.yourCode = g->yourCode;
+      f.longestSeconds = secs(g->durations.longest);
+      f.longWait = longWait;
+      f.onlyLongWait = !bigShare;
       const uint32_t waker = TopWaker(*g);
       if (c == Category::Lock && an.IsProgramThread(waker) && waker != tid) {
         // What was the thread that released the lock busy with?
@@ -349,6 +369,11 @@ inline std::string RenderText(const Report& r) {
             w.thread.c_str(), FormatDuration(w.seconds).c_str(), w.pct, w.count,
             w.stillWaitingAtEnd ? ", still waiting at the end" : "");
     Appendf(out, "      Waiting on : %s\n", CategoryLabel(w.category));
+    if (w.p95Seconds >= 0)
+      Appendf(out, "      Longest    : %s (95%% of the waits took at most %s)\n",
+              FormatDuration(w.longestSeconds).c_str(), FormatDuration(w.p95Seconds).c_str());
+    else
+      Appendf(out, "      Longest    : %s\n", FormatDuration(w.longestSeconds).c_str());
     Appendf(out, "      Your code  : %s\n", w.yourCode.c_str());
     // One system function, or the main ones with their shares.
     std::string blocked;
@@ -379,8 +404,16 @@ inline std::string RenderText(const Report& r) {
               f.thread.c_str(), f.pct);
       continue;
     }
-    Appendf(out, "  * %s spent %.0f%% of the time %s, in %s.\n", f.thread.c_str(), f.pct,
-            CategorySentence(f.category), f.yourCode.c_str());
+    if (f.onlyLongWait) {
+      Appendf(out, "  * %s was stuck for up to %s at a time %s, in %s (%.0f%% of the time in all).\n",
+              f.thread.c_str(), FormatDuration(f.longestSeconds).c_str(),
+              CategorySentence(f.category), f.yourCode.c_str(), f.pct);
+    } else {
+      Appendf(out, "  * %s spent %.0f%% of the time %s, in %s.\n", f.thread.c_str(), f.pct,
+              CategorySentence(f.category), f.yourCode.c_str());
+      if (f.longWait)
+        Appendf(out, "    Its longest single wait was %s.\n", FormatDuration(f.longestSeconds).c_str());
+    }
     if (f.hasReleaser) {
       Appendf(out, "    The lock was released by %s, which spends its time %s, in %s.\n",
               f.releaser.c_str(), CategorySentence(f.releaserCategory), f.releaserCode.c_str());
