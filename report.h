@@ -547,6 +547,116 @@ inline void Appendf(std::string& out, const char* format, ...) {
   out += big;
 }
 
+// One item of "What this means" as the text report prints it; the HTML report (W36) shows the
+// same words.
+inline std::string RenderFindingText(const Finding& f) {
+  std::string out;
+  if (f.kind == Finding::Kind::CpuCompetition) {
+    Appendf(out,
+            "  * %s spent %.0f%% of the time ready to run but waiting for a free CPU.\n"
+            "    The machine is busy; this is CPU competition, not a blocking problem.\n",
+            f.thread.c_str(), f.pct);
+    return out;
+  }
+  if (f.onlyLongWait) {
+    Appendf(out, "  * %s was stuck for up to %s at a time %s, in %s (%.0f%% of the time in all).\n",
+            f.thread.c_str(), FormatDuration(f.longestSeconds).c_str(),
+            CategorySentence(f.category), f.yourCode.c_str(), f.pct);
+  } else {
+    Appendf(out, "  * %s spent %.0f%% of the time %s, in %s.\n", f.thread.c_str(), f.pct,
+            CategorySentence(f.category), f.yourCode.c_str());
+    if (f.longWait)
+      Appendf(out, "    Its longest single wait was %s.\n", FormatDuration(f.longestSeconds).c_str());
+  }
+  if (!f.chain.empty()) {
+    // Measured (W25): what the waker did while this thread waited for it.
+    if (f.category == Category::Lock)
+      Appendf(out, "    The lock was released by %s. While %s waited (%s), %s was\n",
+              f.waker.c_str(), f.thread.c_str(), FormatDuration(f.chainSeconds).c_str(),
+              f.waker.c_str());
+    else
+      Appendf(out, "    It was woken by %s. While %s waited (%s), %s was\n", f.waker.c_str(),
+              f.thread.c_str(), FormatDuration(f.chainSeconds).c_str(), f.waker.c_str());
+    for (size_t k = 0; k < f.chain.size() && k < 3; ++k) {
+      const ChainPart& p = f.chain[k];
+      std::string what = p.kind == ChainPart::Kind::Running   ? "running"
+                         : p.kind == ChainPart::Kind::Ready   ? "waiting for a free CPU"
+                         : p.kind == ChainPart::Kind::NotSeen ? "not seen (outside the trace)"
+                                                              : std::string(CategorySentence(p.category)) + ", in " + p.yourCode;
+      Appendf(out, "      %s: %s (%.0f%%)\n", what.c_str(), FormatDuration(p.seconds).c_str(), p.pct);
+    }
+    const ChainPart& top = f.chain.front();
+    if (f.category == Category::Lock) {
+      if (top.kind == ChainPart::Kind::Running)
+        Appendf(out, "    So it holds the lock while it is running. Do less work while holding the lock.\n");
+      else if (top.kind == ChainPart::Kind::Ready)
+        Appendf(out, "    So it holds the lock while it is waiting for a free CPU. The machine is overloaded.\n");
+      else if (top.kind == ChainPart::Kind::Waiting && top.category == Category::Sleep)
+        Appendf(out, "    So it holds the lock while it is sleeping on purpose. Release the lock before sleeping.\n");
+      else if (top.kind == ChainPart::Kind::Waiting && top.category == Category::Lock)
+        Appendf(out, "    So it holds the lock while it is waiting for another lock: one lock waits on the next.\n");
+      else if (top.kind == ChainPart::Kind::Waiting)
+        Appendf(out,
+                "    So it holds the lock while it is %s. Move that work outside the lock\n"
+                "    (copy the data first, then do the work).\n",
+                CategorySentence(top.category));
+    }
+  } else if (f.hasReleaser) {
+    Appendf(out, "    The lock was released by %s, which spends its time %s, in %s.\n",
+            f.releaser.c_str(), CategorySentence(f.releaserCategory), f.releaserCode.c_str());
+    Appendf(out,
+            "    It is most likely holding the lock during that slow work. Move the\n"
+            "    slow work outside the lock (copy the data first, then do the work).\n");
+  }
+  return out;
+}
+
+// The data-quality section of the text report (W24).
+inline std::string RenderQualityText(const Report& r) {
+  std::string out;
+  const DataQuality& q = r.quality;
+  Appendf(out, "\nData quality: %s", LevelName(q.confidence));
+  for (size_t i = 0; i < q.reasons.size(); ++i)
+    Appendf(out, "%s%s", i ? ", " : " (", q.reasons[i].c_str());
+  Appendf(out, "%s\n", q.reasons.empty() ? "" : ")");
+  if (q.eventsLost || q.buffersLost)
+    Appendf(out, "  Events lost      : %llu events, %llu buffers\n",
+            static_cast<unsigned long long>(q.eventsLost), static_cast<unsigned long long>(q.buffersLost));
+  else
+    Appendf(out, "  Events lost      : none\n");
+  Appendf(out, "  Call stacks      : %.0f%% of wait time (%llu waits with a call stack, %llu without; %llu kernel-only stack parts)\n",
+          q.stackPct, static_cast<unsigned long long>(r.waitsWithStack),
+          static_cast<unsigned long long>(r.waitsWithoutStack),
+          static_cast<unsigned long long>(r.kernelOnlyFragments));
+  if (q.wakerKnownPct >= 0)
+    Appendf(out, "  Wakers known     : %.0f%% of the time in waits that ended\n", q.wakerKnownPct);
+  auto join = [](const std::vector<std::string>& names) {
+    std::string text;
+    for (size_t i = 0; i < names.size(); ++i) text += (i ? ", " : "") + names[i];
+    return text;
+  };
+  if (!q.modulesKnown) {
+    Appendf(out, "  Function names   : not recorded\n");
+  } else {
+    std::string names;
+    if (!q.fullModules.empty()) names += "full names in " + join(q.fullModules);
+    if (!q.exportModules.empty())
+      names += (names.empty() ? "" : "; ") + std::string("only exported names in ") + join(q.exportModules);
+    if (!q.unnamedModules.empty())
+      names += (names.empty() ? "" : "; ") + std::string("no names in ") + join(q.unnamedModules);
+    Appendf(out, "  Function names   : %s\n", names.c_str());
+    if (!q.exportModules.empty())
+      Appendf(out, "                     (exported names only: a function that is not exported shows\n"
+                   "                     as the nearest exported one, so those names can be wrong;\n"
+                   "                     --symbols ms downloads Windows' own symbols)\n");
+  }
+  if (!q.pdbNextToExe.empty())
+    Appendf(out, "  Note             : %s does not match the program; build both together (/Zi)\n",
+            q.pdbNextToExe.c_str());
+  Appendf(out, "  Context switches : %llu seen\n", static_cast<unsigned long long>(r.contextSwitches));
+  return out;
+}
+
 // The report as text. CI and scripts match some of these lines; keep them stable (README,
 // "Report lines scripts can rely on").
 inline std::string RenderText(const Report& r) {
@@ -616,108 +726,11 @@ inline std::string RenderText(const Report& r) {
             r.hiddenWaitRows, FormatDuration(r.hiddenWaitSeconds).c_str());
 
   Appendf(out, "\nWhat this means\n");
-  for (const Finding& f : r.findings) {
-    if (f.kind == Finding::Kind::CpuCompetition) {
-      Appendf(out,
-              "  * %s spent %.0f%% of the time ready to run but waiting for a free CPU.\n"
-              "    The machine is busy; this is CPU competition, not a blocking problem.\n",
-              f.thread.c_str(), f.pct);
-      continue;
-    }
-    if (f.onlyLongWait) {
-      Appendf(out, "  * %s was stuck for up to %s at a time %s, in %s (%.0f%% of the time in all).\n",
-              f.thread.c_str(), FormatDuration(f.longestSeconds).c_str(),
-              CategorySentence(f.category), f.yourCode.c_str(), f.pct);
-    } else {
-      Appendf(out, "  * %s spent %.0f%% of the time %s, in %s.\n", f.thread.c_str(), f.pct,
-              CategorySentence(f.category), f.yourCode.c_str());
-      if (f.longWait)
-        Appendf(out, "    Its longest single wait was %s.\n", FormatDuration(f.longestSeconds).c_str());
-    }
-    if (!f.chain.empty()) {
-      // Measured (W25): what the waker did while this thread waited for it.
-      if (f.category == Category::Lock)
-        Appendf(out, "    The lock was released by %s. While %s waited (%s), %s was\n",
-                f.waker.c_str(), f.thread.c_str(), FormatDuration(f.chainSeconds).c_str(),
-                f.waker.c_str());
-      else
-        Appendf(out, "    It was woken by %s. While %s waited (%s), %s was\n", f.waker.c_str(),
-                f.thread.c_str(), FormatDuration(f.chainSeconds).c_str(), f.waker.c_str());
-      for (size_t k = 0; k < f.chain.size() && k < 3; ++k) {
-        const ChainPart& p = f.chain[k];
-        std::string what = p.kind == ChainPart::Kind::Running   ? "running"
-                           : p.kind == ChainPart::Kind::Ready   ? "waiting for a free CPU"
-                           : p.kind == ChainPart::Kind::NotSeen ? "not seen (outside the trace)"
-                                                                : std::string(CategorySentence(p.category)) + ", in " + p.yourCode;
-        Appendf(out, "      %s: %s (%.0f%%)\n", what.c_str(), FormatDuration(p.seconds).c_str(), p.pct);
-      }
-      const ChainPart& top = f.chain.front();
-      if (f.category == Category::Lock) {
-        if (top.kind == ChainPart::Kind::Running)
-          Appendf(out, "    So it holds the lock while it is running. Do less work while holding the lock.\n");
-        else if (top.kind == ChainPart::Kind::Ready)
-          Appendf(out, "    So it holds the lock while it is waiting for a free CPU. The machine is overloaded.\n");
-        else if (top.kind == ChainPart::Kind::Waiting && top.category == Category::Sleep)
-          Appendf(out, "    So it holds the lock while it is sleeping on purpose. Release the lock before sleeping.\n");
-        else if (top.kind == ChainPart::Kind::Waiting && top.category == Category::Lock)
-          Appendf(out, "    So it holds the lock while it is waiting for another lock: one lock waits on the next.\n");
-        else if (top.kind == ChainPart::Kind::Waiting)
-          Appendf(out,
-                  "    So it holds the lock while it is %s. Move that work outside the lock\n"
-                  "    (copy the data first, then do the work).\n",
-                  CategorySentence(top.category));
-      }
-    } else if (f.hasReleaser) {
-      Appendf(out, "    The lock was released by %s, which spends its time %s, in %s.\n",
-              f.releaser.c_str(), CategorySentence(f.releaserCategory), f.releaserCode.c_str());
-      Appendf(out,
-              "    It is most likely holding the lock during that slow work. Move the\n"
-              "    slow work outside the lock (copy the data first, then do the work).\n");
-    }
-  }
+  for (const Finding& f : r.findings) out += RenderFindingText(f);
   if (r.findings.empty())
     Appendf(out, "  No thread lost a significant share of its time to blocking (sleeps excluded).\n");
 
-  const DataQuality& q = r.quality;
-  Appendf(out, "\nData quality: %s", LevelName(q.confidence));
-  for (size_t i = 0; i < q.reasons.size(); ++i)
-    Appendf(out, "%s%s", i ? ", " : " (", q.reasons[i].c_str());
-  Appendf(out, "%s\n", q.reasons.empty() ? "" : ")");
-  if (q.eventsLost || q.buffersLost)
-    Appendf(out, "  Events lost      : %llu events, %llu buffers\n",
-            static_cast<unsigned long long>(q.eventsLost), static_cast<unsigned long long>(q.buffersLost));
-  else
-    Appendf(out, "  Events lost      : none\n");
-  Appendf(out, "  Call stacks      : %.0f%% of wait time (%llu waits with a call stack, %llu without; %llu kernel-only stack parts)\n",
-          q.stackPct, static_cast<unsigned long long>(r.waitsWithStack),
-          static_cast<unsigned long long>(r.waitsWithoutStack),
-          static_cast<unsigned long long>(r.kernelOnlyFragments));
-  if (q.wakerKnownPct >= 0)
-    Appendf(out, "  Wakers known     : %.0f%% of the time in waits that ended\n", q.wakerKnownPct);
-  auto join = [](const std::vector<std::string>& names) {
-    std::string text;
-    for (size_t i = 0; i < names.size(); ++i) text += (i ? ", " : "") + names[i];
-    return text;
-  };
-  if (!q.modulesKnown) {
-    Appendf(out, "  Function names   : not recorded\n");
-  } else {
-    std::string names;
-    if (!q.fullModules.empty()) names += "full names in " + join(q.fullModules);
-    if (!q.exportModules.empty())
-      names += (names.empty() ? "" : "; ") + std::string("only exported names in ") + join(q.exportModules);
-    if (!q.unnamedModules.empty())
-      names += (names.empty() ? "" : "; ") + std::string("no names in ") + join(q.unnamedModules);
-    Appendf(out, "  Function names   : %s\n", names.c_str());
-    if (!q.exportModules.empty())
-      Appendf(out, "                     (exported names only: a function that is not exported shows\n"
-                   "                     as the nearest exported one, so those names can be wrong;\n"
-                   "                     --symbols ms downloads Windows' own symbols)\n");
-  }
-  if (!q.pdbNextToExe.empty())
-    Appendf(out, "  Note             : %s does not match the program; build both together (/Zi)\n",
-            q.pdbNextToExe.c_str());
-  Appendf(out, "  Context switches : %llu seen\n", static_cast<unsigned long long>(r.contextSwitches));
+  out += RenderQualityText(r);
   return out;
 }
 

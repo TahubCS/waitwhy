@@ -65,6 +65,7 @@
 #include "report.h"
 #include "diff.h"
 #include "export.h"
+#include "html.h"
 
 #ifdef _MSC_VER
 #pragma comment(lib, "advapi32.lib")
@@ -1151,19 +1152,22 @@ void WriteDumpNames(FILE* out, const SymbolizerFor& symbolsFor, bool symbolsOk, 
 // Report
 // ---------------------------------------------------------------------------
 
-// --format and --out (W34): the report as text or JSON, on the console or into a file.
+constexpr char kVersion[] = "0.9.0";
+
+// --format and --out (W34): the report as text, JSON or HTML (W36), on the console or into a file.
 struct Output {
   bool json = false;
+  bool html = false;
   std::wstring file;
   std::wstring chromeFile, speedscopeFile;  // --export-chrome, --export-speedscope (W37)
   FILE* console = nullptr;  // where JSON for the console goes; everything else goes to stderr
 };
 Output g_output;
 
-// JSON on the console must be the only thing there, so a script can parse it: from here on
-// every other line waitwhy prints goes to stderr.
+// JSON (or HTML) on the console must be the only thing there, so a script can parse it: from
+// here on every other line waitwhy prints goes to stderr.
 void KeepConsoleForJson() {
-  if (!g_output.json || !g_output.file.empty()) return;
+  if ((!g_output.json && !g_output.html) || !g_output.file.empty()) return;
   std::fflush(stdout);
   const int copy = _dup(_fileno(stdout));
   if (copy < 0) return;
@@ -1171,8 +1175,10 @@ void KeepConsoleForJson() {
   _dup2(_fileno(stderr), _fileno(stdout));
 }
 
-int WriteReport(const Report& report) {
-  const std::string text = g_output.json ? RenderJson(report) : RenderText(report);
+int WriteReport(const Report& report, const Analyzer& an, const SymbolsFor& symbols, double ticksPerSecond) {
+  const std::string text = g_output.html   ? RenderHtml(report, an, symbols, ticksPerSecond, kVersion)
+                           : g_output.json ? RenderJson(report)
+                                           : RenderText(report);
   if (g_output.file.empty()) {
     FILE* out = g_output.console ? g_output.console : stdout;
     std::fputs(text.c_str(), out);
@@ -1189,8 +1195,6 @@ int WriteReport(const Report& report) {
   std::printf("Wrote the report to %s.\n", Narrow(g_output.file).c_str());
   return kExitOk;
 }
-
-constexpr char kVersion[] = "0.9.0";
 
 bool WriteTextFile(const std::wstring& file, const std::string& text, const char* what) {
   FILE* f = nullptr;
@@ -1241,7 +1245,7 @@ int PrintReport(double ticksPerSecond, ReportOptions opt, const SessionProps& st
   opt.pdbNextToExe = sym.PdbNextToExe();
   const SymbolsFor symbols([&symbolsFor](uint32_t pid) -> SymbolSource& { return symbolsFor(pid); });
   const Report report = BuildReport(g_analysis, symbols, opt, ProgramThreadLabel);
-  const int code = WriteReport(report);
+  const int code = WriteReport(report, g_analysis, symbols, ticksPerSecond);
   const int exported = WriteExports(g_analysis, symbols, ProgramThreadLabel, ticksPerSecond, report.program);
   return code != kExitOk ? code : exported;
 }
@@ -1274,10 +1278,10 @@ int ReportFromDump(const std::wstring& path, ReportOptions opt) {
     auto it = info.threadNames.find(tid);
     return it != info.threadNames.end() ? it->second : "Thread " + std::to_string(tid);
   };
-  if (!g_output.json) std::printf("Report rebuilt from %s.\n", Narrow(path).c_str());
+  if (!g_output.json && !g_output.html) std::printf("Report rebuilt from %s.\n", Narrow(path).c_str());
   const SymbolsFor symbols(std::ref(sym));
   const Report report = BuildReport(an, symbols, opt, name);
-  const int code = WriteReport(report);
+  const int code = WriteReport(report, an, symbols, opt.ticksPerSecond);
   const int exported = WriteExports(an, symbols, name, opt.ticksPerSecond, report.program);
   return code != kExitOk ? code : exported;
 }
@@ -1312,8 +1316,10 @@ void Usage() {
       "                       path. Without it, _NT_SYMBOL_PATH is used when set.\n"
       "\n"
       "Report options:\n"
-      "  --format text|json   the report as text (default) or as JSON; the JSON layout is\n"
-      "                       docs/report-schema.json\n"
+      "  --format text|json|html\n"
+      "                       the report as text (default), as JSON (its layout is\n"
+      "                       docs/report-schema.json) or as one self-contained HTML page\n"
+      "                       with a timeline, call stacks and a flame graph\n"
       "  --out FILE           write the report to FILE instead of the console\n"
       "  --export-chrome FILE\n"
       "                       also write each thread's timeline as a Chrome trace, for\n"
@@ -1493,8 +1499,10 @@ int wmain(int argc, wchar_t** argv) {
       fromDump = value;
     } else if (a == L"--format") {
       const std::wstring format = value;
-      if (format != L"text" && format != L"json") return UsageError("--format is text or json.");
+      if (format != L"text" && format != L"json" && format != L"html")
+        return UsageError("--format is text, json or html.");
       g_output.json = format == L"json";
+      g_output.html = format == L"html";
     } else if (a == L"--out") {
       g_output.file = value;
     } else if (a == L"--export-chrome") {

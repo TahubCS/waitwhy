@@ -88,6 +88,13 @@ jobs:
           }
           $speedscope = Get-Content golden-speedscope.json -Raw | ConvertFrom-Json
           if ($speedscope.profiles.Count -lt 3 -or $speedscope.shared.frames.Count -lt 1) { throw "the speedscope profile is missing threads or frames" }
+          # W36: the report as one HTML page.
+          .\waitwhy.exe analyze tests\golden\slowapp-lock.events.txt --format html --out golden.html | Out-Host
+          if ($LASTEXITCODE -ne 0) { throw "analyze --format html failed" }
+          $html = Get-Content golden.html -Raw
+          if (-not $html.StartsWith('<!doctype html>') -or $html -notmatch 'waiting for a lock that another thread was holding, in slowapp!.*update_frame') {
+            throw "the HTML report is not a page with main's lock finding"
+          }
 
       # C8 smoke test: waitwhy must report the lock bug in buggy slowapp and nothing in fixed
       # slowapp. GitHub's Windows runners run as Administrator, which kernel tracing needs.
@@ -173,6 +180,12 @@ jobs:
           $speedscope = Get-Content buggy-speedscope.json -Raw | ConvertFrom-Json
           if (-not ($speedscope.shared.frames | Where-Object { $_.name -like '*update_frame*' })) {
             $failures += 'speedscope profile: no update_frame frame in the buggy run.'
+          }
+
+          # W36: the buggy run as an HTML page, kept with the dumps.
+          & .\waitwhy.exe analyze buggy-events.txt --format html --out buggy.html | Out-Null
+          if ((Get-Content buggy.html -Raw) -notmatch 'waiting for a lock that another thread was holding, in slowapp!.*update_frame') {
+            $failures += 'HTML report: no lock finding in update_frame in the buggy run.'
           }
 
           # W35: diff as a CI gate. Going from the fixed to the buggy slowapp must fail it.
@@ -295,6 +308,7 @@ jobs:
             launch-report.txt
             buggy-chrome.json
             buggy-speedscope.json
+            buggy.html
           if-no-files-found: ignore
 
   # The analysis core (analysis.h) makes no Windows calls (D7), so its tests also run here, with

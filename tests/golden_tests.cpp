@@ -15,6 +15,7 @@
 #include "../diff.h"
 #include "../dump.h"
 #include "../export.h"
+#include "../html.h"
 #include "../report.h"
 #include "check.h"
 
@@ -133,6 +134,40 @@ void CheckExports(const std::vector<DumpLine>& lines) {
   expect("speedscope events nest, in time order, within each profile", balanced);
 }
 
+// W36: the HTML page holds the report's findings and charts, and nothing it would have to
+// load from elsewhere.
+void CheckHtml(const std::vector<DumpLine>& lines, const Report& report) {
+  Analyzer an;
+  DumpReplay replay(an);
+  const DumpInfo info = replay.Run(lines);
+  DumpSymbolsByProcess sym(lines);
+  const std::string html = RenderHtml(report, an, SymbolsFor(std::ref(sym)), info.ticksPerSecond, "test");
+  auto count = [&html](const std::string& what) {
+    size_t n = 0;
+    for (size_t at = html.find(what); at != std::string::npos; at = html.find(what, at + what.size())) ++n;
+    return n;
+  };
+  auto expect = [](const char* what, bool ok) {
+    std::printf("  %s %s\n", ok ? "ok  " : "FAIL", what);
+    if (!ok) ++Failures();
+  };
+  expect("HTML starts with a doctype", html.compare(0, 15, "<!doctype html>") == 0);
+  expect("HTML loads nothing", count("<script") == 0 && count("src=") == 0 && count("href=") == 0 &&
+                                   count("url(") == 0 && count("@import") == 0);
+  expect("HTML has main's lock finding, escaped",
+         count("Thread 1 (main) spent 30% of the time waiting for a lock that another thread was holding, in "
+               "slowapp!`anonymous namespace&#39;::update_frame.") == 1);
+  expect("HTML has the measured chain as a bar", count("<svg class=\"bar\"") == 1);
+  expect("HTML has a timeline and a flame graph", count("<svg class=\"chart\"") == 2);
+  expect("every svg and details is closed", count("<svg") == count("</svg>") && count("<details>") == count("</details>") &&
+                                                count("<g>") == count("</g>"));
+  expect("HTML timeline stays small", count("<rect") < 2000);
+  expect("flame graph shows the lock wait", count("[a lock held by another thread]") >= 1);
+  expect("flame graph leaves out sleeps", count("[an intentional sleep or timer]") == 0);
+  expect("HTML has a stack per biggest wait", count("<details>") == report.waits.size());
+  expect("HTML has the data quality", count("Data quality: high") == 1);
+}
+
 // Prints the first line where the two texts differ.
 void ShowFirstDifference(const std::string& got, const std::string& want) {
   std::istringstream g(got), w(want);
@@ -185,6 +220,7 @@ int main(int argc, char** argv) {
       }
     }
     CheckExports(lines);
+    CheckHtml(lines, report);
   }
   std::printf(Failures() ? "%d check(s) failed.\n" : "All checks passed.\n", Failures());
   return Failures() ? 1 : 0;

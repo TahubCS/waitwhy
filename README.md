@@ -113,6 +113,14 @@ $report.findings | Where-Object category -eq 'lock'
 
 Two JSON reports can be compared, for example before and after a change: `waitwhy diff before.json after.json --fail-if-worse 10` exits with 3 when an activity got worse by more than 10 percentage points or a finding is new. `docs/ci-gate.md` shows how to use it in CI.
 
+## One page to share: HTML
+
+`--format html --out report.html` writes the report as a single HTML page that opens in any browser, offline: the findings, each measured wait chain as a bar, a timeline of every thread (hover for what it was doing), the biggest waits with their call stacks, an off-CPU flame graph of where the threads waited, and the data-quality section. Everything is inline, so the file can be attached to a bug report. `analyze` makes the same page from a dump:
+
+```powershell
+.\waitwhy.exe analyze slowapp-events.txt --format html --out slowapp.html
+```
+
 ## Timelines in other viewers
 
 `--export-chrome FILE` writes each thread's timeline (running, wanting a CPU, and each wait with what it was on and the function in your code) as Chrome trace JSON; open it at [ui.perfetto.dev](https://ui.perfetto.dev) or in `chrome://tracing`. `--export-speedscope FILE` writes the same timeline for [speedscope.app](https://www.speedscope.app), where each wait sits on top of its call stack. Both work while watching and with `analyze`, so a dump can be turned into a timeline later:
