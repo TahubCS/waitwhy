@@ -1,0 +1,108 @@
+name: release
+
+# W42: a v* tag builds, tests and publishes a release. Run by hand (workflow_dispatch) it is a
+# dry run: the same zip, kept as a workflow artifact, with no release.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # Every check of a normal push, including the traced smoke runs and scenarios.
+  checks:
+    uses: ./.github/workflows/build.yml
+
+  package:
+    needs: checks
+    runs-on: windows-latest
+    permissions:
+      contents: write      # the GitHub Release
+      id-token: write      # build provenance
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            $version = $env:GITHUB_REF_NAME -replace '^v', ''
+            if ($version -notmatch '^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$') { throw "Tag $env:GITHUB_REF_NAME is not v<semver>" }
+          } else {
+            $version = "0.0.0-dryrun.$env:GITHUB_RUN_NUMBER"
+          }
+          "VERSION=$version" >> $env:GITHUB_ENV
+          Set-Content -Path version.h -Value "#define WAITWHY_VERSION `"$version`"" -Encoding ascii
+          Write-Host "Building waitwhy $version"
+
+      - name: Build
+        shell: pwsh
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          Import-Module (Join-Path $vsPath 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll')
+          Enter-VsDevShell -VsInstallPath $vsPath -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64' | Out-Null
+          cl /nologo /W4 /WX /EHsc /O2 /Zi /std:c++17 waitwhy.cpp /Fe:waitwhy.exe /link /DEBUG /OPT:REF /OPT:ICF
+          if ($LASTEXITCODE -ne 0) { throw "waitwhy.cpp did not compile" }
+          $printed = (& .\waitwhy.exe --version | Out-String).Trim()
+          if ($printed -ne "waitwhy $env:VERSION") { throw "waitwhy --version printed '$printed', expected 'waitwhy $env:VERSION'" }
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $name = "waitwhy-$env:VERSION-win-x64"
+          New-Item -ItemType Directory -Path $name | Out-Null
+          Copy-Item waitwhy.exe, waitwhy.pdb, LICENSE, README.md, CHANGELOG.md -Destination $name
+          $debuggers = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\Debuggers\x64'
+          foreach ($dll in 'dbghelp.dll', 'symsrv.dll') {
+            $source = Join-Path $debuggers $dll
+            if (-not (Test-Path $source)) { throw "$source was not found" }
+            Copy-Item $source -Destination $name
+          }
+          # The user documentation; the test fixtures in docs\traces stay in the repository.
+          Copy-Item docs -Destination "$name\docs" -Recurse
+          Remove-Item "$name\docs\traces" -Recurse -Force
+          Compress-Archive -Path "$name\*" -DestinationPath "$name.zip"
+          $hash = (Get-FileHash "$name.zip" -Algorithm SHA256).Hash.ToLower()
+          Set-Content -Path SHA256SUMS.txt -Value "$hash  $name.zip" -Encoding ascii
+          Get-Content SHA256SUMS.txt
+          "ZIP=$name.zip" >> $env:GITHUB_ENV
+
+          # Release notes: this version's section of CHANGELOG.md.
+          $changelog = Get-Content CHANGELOG.md -Raw
+          $pattern = '(?ms)^## \[' + [regex]::Escape($env:VERSION) + '\][^\n]*\n(.*?)(?=^## \[|\z)'
+          $m = [regex]::Match($changelog, $pattern)
+          if ($m.Success) { $notes = $m.Groups[1].Value.Trim() } else { $notes = "waitwhy $env:VERSION" }
+          Set-Content -Path release-notes.md -Value $notes -Encoding utf8
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and -not $m.Success) {
+            throw "CHANGELOG.md has no section '## [$env:VERSION]'"
+          }
+
+      - name: Keep the package (dry run)
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: waitwhy-release-dryrun
+          path: |
+            ${{ env.ZIP }}
+            SHA256SUMS.txt
+            release-notes.md
+
+      - name: Build provenance
+        if: github.ref_type == 'tag'
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: ${{ env.ZIP }}
+
+      - name: Publish the release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create $env:GITHUB_REF_NAME $env:ZIP SHA256SUMS.txt --title "waitwhy $env:VERSION" --notes-file release-notes.md
+          if ($LASTEXITCODE -ne 0) { throw "gh release create failed" }

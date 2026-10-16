@@ -1275,7 +1275,15 @@ void WriteDumpNames(FILE* out, const SymbolizerFor& symbolsFor, bool symbolsOk, 
 // Report
 // ---------------------------------------------------------------------------
 
-constexpr char kVersion[] = "0.9.0";
+// The version (W42). A release build writes version.h with the tag's version; any other build
+// is a development build of the next release.
+#if __has_include("version.h")
+#include "version.h"
+#endif
+#ifndef WAITWHY_VERSION
+#define WAITWHY_VERSION "1.0.0-dev"
+#endif
+constexpr char kVersion[] = WAITWHY_VERSION;
 
 // --format and --out (W34): the report as text, JSON or HTML (W36), on the console or into a file.
 struct Output {

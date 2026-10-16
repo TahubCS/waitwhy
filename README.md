@@ -27,7 +27,16 @@ From an Administrator PowerShell:
 | Fail CI when waiting got worse | `.\waitwhy.exe diff before.json after.json --fail-if-worse 10` |
 | Name Windows' own functions too | add `--symbols ms` |
 
-Build it with `cl /nologo /W4 /WX /EHsc /O2 /Zi /std:c++17 waitwhy.cpp /Fe:waitwhy.exe` from an x64 Developer PowerShell for Visual Studio.
+## Install
+
+Download `waitwhy-VERSION-win-x64.zip` from the [Releases](https://github.com/TahubCS/waitwhy/releases) page and unzip it anywhere; there is nothing to install. The zip holds `waitwhy.exe` and its `.pdb`, Microsoft's redistributable `dbghelp.dll` and `symsrv.dll` (for `--symbols ms`), the license, this README and the docs. To check the download:
+
+```powershell
+(Get-FileHash .\waitwhy-1.0.0-win-x64.zip -Algorithm SHA256).Hash   # compare with SHA256SUMS.txt
+gh attestation verify .\waitwhy-1.0.0-win-x64.zip -R TahubCS/waitwhy   # built by this repository's release workflow
+```
+
+Or build it yourself with `cl /nologo /W4 /WX /EHsc /O2 /Zi /std:c++17 waitwhy.cpp /Fe:waitwhy.exe` from an x64 Developer PowerShell for Visual Studio. `CHANGELOG.md` lists what each version changed.
 
 ## Documentation
 

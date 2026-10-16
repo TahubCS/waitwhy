@@ -62,6 +62,8 @@ was stuck in (DbgHelp + .pdb); and which thread woke it up.
 | `docs/report-schema.json` | JSON Schema of `--format json` (W34), version `waitwhy-report/1`. |
 | `tests/check.h` | Check helpers shared by the tests. |
 | `LICENSE` | MIT (D11). |
+| `CHANGELOG.md` | What each version changed (W42). Add to `## [Unreleased]` with user-visible changes; a release renames it to the version. |
+| `.github/workflows/release.yml` | W42: a `v*` tag runs every check of `build.yml`, builds with `version.h` from the tag, and publishes a zip with SHA-256 sums and build provenance. Run by hand it is a dry run that keeps the zip as an artifact. Only the user pushes tags. |
 | `ROADMAP.md` | Proposed phased plan towards a tool others can rely on (`R` items, open decisions `X`). A proposal, not approved; `FEATURES.md` wins on any conflict. |
 
 ## Build

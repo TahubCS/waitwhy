@@ -60,3 +60,6 @@ $RECYCLE.BIN/
 
 # macOS
 .DS_Store
+
+# Written by the release workflow (W42)
+version.h
