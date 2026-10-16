@@ -354,6 +354,44 @@ jobs:
           if ($failures.Count -gt 0) { exit 1 }
           Write-Host 'All scenarios gave their expected findings.'
 
+      # W43: how much watching and recording slow a program down. scenarios --mode bench hands a
+      # token between pairs of threads as fast as it can: two context switches, each with a call
+      # stack, per hand-over, about the worst case. Reported, not enforced.
+      - name: Overhead (bench)
+        shell: pwsh
+        run: |
+          function Bench([string[]]$Waitwhy) {
+            $out = Join-Path $PWD ("bench-" + [guid]::NewGuid() + ".txt")
+            $p = Start-Process -FilePath (Resolve-Path .\scenarios.exe) -PassThru -NoNewWindow -RedirectStandardOutput $out `
+              -ArgumentList @('--mode', 'bench', '--seconds', '10')
+            $null = $p.Handle
+            if ($Waitwhy) { & .\waitwhy.exe @Waitwhy --pid $p.Id --seconds 9 *> $null }
+            $p.WaitForExit()
+            $text = Get-Content $out -Raw
+            if ($text -notmatch '(\d+) hand-overs per second') { throw "bench printed: $text" }
+            return [double]$Matches[1]
+          }
+          $alone = Bench @()
+          $watched = Bench @('watch')
+          $recorded = Bench @('record', '--out', 'bench.etl')
+          $alone2 = Bench @()
+          $base = ($alone + $alone2) / 2
+          $rows = @(
+            @('alone (mean of 2 runs)', $base),
+            @('waitwhy watch', $watched),
+            @('waitwhy record', $recorded))
+          $summary = "| bench (worst case) | hand-overs/s | slowdown |`n|---|---|---|`n"
+          foreach ($r in $rows) {
+            $slow = if ($base -gt 0) { 100 * (1 - $r[1] / $base) } else { 0 }
+            $summary += "| $($r[0]) | $([math]::Round($r[1])) | $([math]::Round($slow))% |`n"
+            if ($r[0] -ne 'alone (mean of 2 runs)' -and $slow -gt 50) {
+              Write-Host "::warning::$($r[0]) slowed the bench by $([math]::Round($slow))% (over 50%)."
+            }
+          }
+          $summary += "`nThe two runs alone: $([math]::Round($alone)) and $([math]::Round($alone2)) hand-overs/s.`n"
+          Write-Host $summary
+          $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
       # The smoke runs' event dumps (version 2, W18) and reports, for turning into test fixtures.
       - name: Keep the smoke-test dumps and reports
         if: always()

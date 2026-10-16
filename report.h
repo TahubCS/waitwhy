@@ -222,10 +222,10 @@ inline Report BuildReport(const Analyzer& an, const SymbolsFor& symbolsFor, cons
   r.program = opt.exeFile.empty() ? "process" : opt.exeFile;
   r.pid = an.pid;
   r.windowSeconds = window;
-  char line[160];
+  char line[256];
   if (opt.eventsLost || opt.buffersLost) {
     std::snprintf(line, sizeof line,
-                  "Windows dropped %llu events (%llu buffers). Numbers may be a bit low.",
+                  "Windows dropped %llu events (%llu buffers). Numbers may be a bit low; waitwhy record keeps up better.",
                   static_cast<unsigned long long>(opt.eventsLost),
                   static_cast<unsigned long long>(opt.buffersLost));
     r.warnings.push_back(line);

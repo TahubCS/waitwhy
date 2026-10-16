@@ -20,6 +20,9 @@
 //   lockdisk    main waits for a lock that a worker holds while writing to disk
 //   sleep       everything only sleeps: no finding
 //   sleeper     (used by child) sleeps and exits
+//   bench       (W43, for measuring waitwhy's overhead) pairs of threads hand a token back and
+//               forth as fast as they can, about the worst case for waitwhy: every hand-over
+//               is two context switches, each with a call stack. Prints hand-overs per second.
 
 #ifndef UNICODE
 #define UNICODE
@@ -351,6 +354,44 @@ void RunSleep() {
   other.join();
 }
 
+// ---- bench --------------------------------------------------------------------------------
+
+struct PingPong {
+  std::mutex lock;
+  std::condition_variable changed;
+  bool ping = true;
+  unsigned long long handovers = 0;
+};
+
+NOINLINE void pass_token(PingPong& p, bool mine) {
+  std::unique_lock<std::mutex> hold(p.lock);
+  p.changed.wait(hold, [&] { return p.ping == mine || g_quit; });
+  p.ping = !mine;
+  ++p.handovers;
+  hold.unlock();
+  p.changed.notify_one();
+}
+
+void RunBench(int seconds) {
+  const unsigned pairs = (std::max)(1u, std::thread::hardware_concurrency() / 2);
+  std::vector<PingPong> games(pairs);
+  std::vector<std::thread> threads;
+  const auto start = std::chrono::steady_clock::now();
+  for (PingPong& p : games)
+    for (bool side : {true, false})
+      threads.emplace_back([&p, side] {
+        NameThisThread(side ? L"ping" : L"pong");
+        while (!g_quit) pass_token(p, side);
+        p.changed.notify_all();
+      });
+  for (std::thread& t : threads) t.join();
+  const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+  unsigned long long total = 0;
+  for (const PingPong& p : games) total += p.handovers;
+  std::printf("bench: %u pairs, %d s, %.0f hand-overs per second\n", pairs, seconds,
+              static_cast<double>(total) / (elapsed > 0 ? elapsed : 1));
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -386,9 +427,10 @@ int main(int argc, char** argv) {
   else if (mode == "child") RunChild();
   else if (mode == "lockcpu" || mode == "locksleep" || mode == "lockdisk") RunLock(mode);
   else if (mode == "sleep") RunSleep();
+  else if (mode == "bench") RunBench(seconds);
   else {
     std::printf("usage: scenarios --mode condvar|coldread|console|pipe|socket|cpu|child|\n"
-                "                        lockcpu|locksleep|lockdisk|sleep [--seconds N]\n");
+                "                        lockcpu|locksleep|lockdisk|sleep|bench [--seconds N]\n");
     return 1;
   }
   return 0;

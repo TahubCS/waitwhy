@@ -739,9 +739,11 @@ void FillProps(SessionProps& sp, bool forStart, bool privateSession = false, con
   // A system-logger session (Windows 8 and later) gets the kernel's events under a name of its
   // own, so tools using "NT Kernel Logger" keep running.
   if (privateSession) sp.props.LogFileMode |= EVENT_TRACE_SYSTEM_LOGGER_MODE;
+  // Context switches come from every CPU; the buffers grow with them (W43).
+  const DWORD cpus = (std::max)(DWORD{1}, GetActiveProcessorCount(ALL_PROCESSOR_GROUPS));
   sp.props.BufferSize = 256;  // KB per buffer; context switches are very frequent
-  sp.props.MinimumBuffers = 128;
-  sp.props.MaximumBuffers = 512;
+  sp.props.MinimumBuffers = (std::max)(DWORD{128}, 4 * cpus);
+  sp.props.MaximumBuffers = (std::min)(DWORD{2048}, (std::max)(DWORD{512}, 16 * cpus));
   sp.props.FlushTimer = 1;
 }
 
