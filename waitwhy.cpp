@@ -210,6 +210,10 @@ std::vector<uint32_t> g_cpuThread(256, kUnknownThread);  // thread currently on 
 bool g_fromTraceFile = false;
 // --no-suspend (W45, D13): no stack snapshots, which pause the program's threads for a moment.
 bool g_noSuspend = false;
+// --redact (W47): no folder paths, user or machine names in the report, dump or exports.
+bool g_redact = false;
+Redactor g_redactor;
+std::string Redacted(const std::string& path) { return g_redact ? g_redactor.Paths(path) : path; }
 std::atomic<bool> g_stopRequested{false};
 // End of the observation window, set by the main thread when it stops watching; 0 until then
 // (W20). Events stamped later are still delivered until the session stops; they are not counted.
@@ -411,7 +415,7 @@ void OnImage(const EVENT_RECORD* ev) {
     std::fprintf(g_dump, "IMAGE ts=%llu base=0x%llx size=0x%llx name=%s\n",
                  static_cast<unsigned long long>(ev->EventHeader.TimeStamp.QuadPart),
                  static_cast<unsigned long long>(image.base),
-                 static_cast<unsigned long long>(image.size), Narrow(image.path).c_str());
+                 static_cast<unsigned long long>(image.size), Redacted(Narrow(image.path)).c_str());
     ++g_dumpLines;
   }
   g_images[pid].push_back(std::move(image));
@@ -514,7 +518,7 @@ const FileIoLayout& FileIoLayoutOf(PEVENT_RECORD ev) {
 void DumpFileName(uint64_t fileObject, const Analyzer::FileName& f) {
   if (!g_dump) return;
   std::fprintf(g_dump, "FILENAME fileObject=0x%llx kind=%d name=%s\n",
-               static_cast<unsigned long long>(fileObject), static_cast<int>(f.kind), f.path.c_str());
+               static_cast<unsigned long long>(fileObject), static_cast<int>(f.kind), Redacted(f.path).c_str());
   ++g_dumpLines;
 }
 
@@ -1220,7 +1224,7 @@ void WriteDumpNames(FILE* out, const SymbolizerFor& symbolsFor, bool symbolsOk, 
   Symbolizer& primary = symbolsFor(an.pid);
   std::fprintf(out, "NAMES symbolsOk=%d fromTrace=%d\n", symbolsOk ? 1 : 0, primary.FromImages() ? 1 : 0);
   const std::string pdb = primary.PdbNextToExe();
-  if (!pdb.empty()) std::fprintf(out, "PDB file=%s\n", pdb.c_str());
+  if (!pdb.empty()) std::fprintf(out, "PDB file=%s\n", Redacted(pdb).c_str());
   // With several processes every name says whose it is (W33).
   const bool several = !an.otherPids.empty();
   for (uint32_t process : WatchedProcesses()) {
@@ -1239,7 +1243,7 @@ void WriteDumpNames(FILE* out, const SymbolizerFor& symbolsFor, bool symbolsOk, 
       const std::string& file = sym.SourceFile(addr);
       if (!file.empty())
         std::fprintf(out, "SOURCE %saddr=0x%llx file=%s\n", tag, static_cast<unsigned long long>(addr),
-                     file.c_str());
+                     (g_redact ? g_redactor.Names(file) : file).c_str());
     }
     for (const auto& [module, kind] : sym.ModuleKinds())
       std::fprintf(out, "MODULE %ssymbols=%s name=%s\n", tag,
@@ -1308,7 +1312,9 @@ void KeepConsoleForJson() {
   _dup2(_fileno(stderr), _fileno(stdout));
 }
 
-int WriteReport(const Report& report, const Analyzer& an, const SymbolsFor& symbols, double ticksPerSecond) {
+int WriteReport(const Report& original, const Analyzer& an, const SymbolsFor& symbols, double ticksPerSecond) {
+  Report report = original;
+  if (g_redact) RedactReport(report, g_redactor);
   const std::string text = g_output.html   ? RenderHtml(report, an, symbols, ticksPerSecond, kVersion)
                            : g_output.json ? RenderJson(report)
                                            : RenderText(report);
@@ -1680,6 +1686,8 @@ void Usage() {
       "                       ui.perfetto.dev or chrome://tracing\n"
       "  --export-speedscope FILE\n"
       "                       also write it as a speedscope profile (speedscope.app)\n"
+      "  --redact             leave folder paths and the user's and machine's names out of\n"
+      "                       the report, the dump and the exports, so they can be shared\n"
       "  --top N              show the N biggest groups of waits (default 6)\n"
       "  --min-ms N           hide groups smaller than N milliseconds (default 10)\n"
       "  --stall-ms N         report any single lock, disk, network or page-fault wait of\n"
@@ -1824,6 +1832,15 @@ int wmain(int argc, wchar_t** argv) {
       }
       if (a == L"--no-suspend") {
         g_noSuspend = true;
+        continue;
+      }
+      if (a == L"--redact") {
+        g_redact = true;
+        for (const wchar_t* variable : {L"USERNAME", L"COMPUTERNAME", L"USERDOMAIN"}) {
+          wchar_t value[256];
+          const DWORD n = GetEnvironmentVariableW(variable, value, 256);
+          if (n > 0 && n < 256) g_redactor.names.push_back(Narrow(std::wstring(value, n)));
+        }
         continue;
       }
       if (a == L"--all") {

@@ -26,6 +26,7 @@ From an Administrator PowerShell:
 | Catch a rare hang | `.\waitwhy.exe record --name app.exe --ring 30 --trigger Local\waitwhy --out ring.etl` |
 | Fail CI when waiting got worse | `.\waitwhy.exe diff before.json after.json --fail-if-worse 10` |
 | Name Windows' own functions too | add `--symbols ms` |
+| Share a report without folder paths, user or machine names | add `--redact` |
 
 ## Install
 

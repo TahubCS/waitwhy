@@ -66,6 +66,16 @@ Nothing, unless you ask for Microsoft's symbols with `--symbols ms`; then DbgHel
 symbol files for Windows' own DLLs from Microsoft's public symbol server.
 
 **What should I be careful about when sharing a dump or a trace?**
-A dump (`--dump-events`) holds your program's thread, function and file names. An `.etl` trace
-holds what *every* process on the machine did while it ran, including their names and the
-files they used. Share them only where you would share that.
+What each output holds:
+
+| Output | Holds |
+|---|---|
+| Report (text, JSON, HTML) | Your program's file name, thread names and function names; the files, pipes and processes it waited on; the `.pdb` path when it did not match |
+| Timeline exports | Thread names, function names, what each wait was on |
+| Dump (`--dump-events`) | All of the above, plus the paths of every module the program loaded and the source file paths from its `.pdb` |
+| `.etl` trace | What *every* process on the machine did while it ran, with their names, modules and files |
+
+`--redact` (with `watch`, `analyze` or `record --ring`) cuts every folder path down to its last
+part (`...\settings.tmp`) and replaces the user's and the machine's names with `<hidden>` in
+the report, the dump and the exports. Function and thread names stay: they are your program's
+own. An `.etl` file cannot be redacted; share the redacted report or dump made from it instead.

@@ -7,6 +7,7 @@
 #define WAITWHY_REPORT_H
 
 #include <algorithm>
+#include <cctype>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -671,6 +672,59 @@ inline std::string RenderQualityText(const Report& r) {
             q.pdbNextToExe.c_str());
   Appendf(out, "  Context switches : %llu seen\n", static_cast<unsigned long long>(r.contextSwitches));
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// --redact (W47): reports, dumps and exports without folder paths or user and machine names
+// ---------------------------------------------------------------------------
+
+struct Redactor {
+  std::vector<std::string> names;  // the user's and the machine's names, replaced wherever seen
+
+  // Every folder path in `text` keeps only its last part: "C:\Users\ann\a\b.tmp" becomes
+  // "...\b.tmp", "a pipe (\Device\NamedPipe\x)" becomes "a pipe (...\x)".
+  std::string Paths(const std::string& text) const {
+    const size_t last = text.find_last_of("\\/");
+    if (last == std::string::npos) return Names(text);
+    size_t start = text.find_first_of("\\/");
+    if (start >= 2 && text[start - 1] == ':' && std::isalpha(static_cast<unsigned char>(text[start - 2])))
+      start -= 2;  // a drive letter
+    std::string before = text.substr(0, start);
+    if (before.size() >= 3 && before.compare(before.size() - 3, 3, "...") == 0) before.resize(before.size() - 3);
+    return Names(before + "...\\" + text.substr(last + 1));  // the same when applied again
+  }
+  // The user's and machine's names replaced, ignoring case.
+  std::string Names(std::string text) const {
+    for (const std::string& name : names) {
+      if (name.size() < 2) continue;
+      const std::string lowerName = Lower(name);
+      for (size_t at = Lower(text).find(lowerName); at != std::string::npos;
+           at = Lower(text).find(lowerName, at + 8)) {
+        text.replace(at, name.size(), "<hidden>");
+      }
+    }
+    return text;
+  }
+};
+
+inline void RedactReport(Report& r, const Redactor& red) {
+  for (std::string& w : r.warnings) w = red.Names(w);
+  for (ThreadRow& t : r.threads) t.label = red.Names(t.label);
+  for (WaitRow& w : r.waits) {
+    w.thread = red.Names(w.thread);
+    w.wokenBy = red.Names(w.wokenBy);
+    w.yourCode = red.Names(w.yourCode);
+    for (auto& [object, share] : w.objects) {
+      (void)share;
+      object = red.Paths(object);
+    }
+  }
+  for (Finding& f : r.findings) {
+    f.thread = red.Names(f.thread);
+    f.waker = red.Names(f.waker);
+    f.releaser = red.Names(f.releaser);
+  }
+  r.quality.pdbNextToExe = r.quality.pdbNextToExe.empty() ? std::string() : red.Paths(r.quality.pdbNextToExe);
 }
 
 // The report as text. CI and scripts match some of these lines; keep them stable (README,

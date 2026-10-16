@@ -539,6 +539,29 @@ void CheckBucketCap() {
   ExpectEq("data quality line", RenderText(r).find("Grouped waits    : 10 waits") != std::string::npos, 1);
 }
 
+// W47: --redact keeps the last part of each path and hides the user's and machine's names.
+void CheckRedact() {
+  std::printf("Redaction (W47)\n");
+  Redactor red;
+  red.names = {"ann", "BUILD-PC"};
+  ExpectStr("file path", red.Paths("C:\\Users\\ann\\AppData\\Local\\Temp\\settings.tmp"), "...\\settings.tmp");
+  ExpectStr("pipe", red.Paths("a pipe (\\Device\\NamedPipe\\build-pc-ann-jobs)"),
+            "a pipe (...\\<hidden>-<hidden>-jobs)");
+  ExpectStr("applied twice", red.Paths(red.Paths("D:\\work\\x.log")), "...\\x.log");
+  ExpectStr("no path", red.Paths("the console window"), "the console window");
+  ExpectStr("names ignore case", red.Names("Thread 7 (worker for ANN)"), "Thread 7 (worker for <hidden>)");
+  Report r;
+  WaitRow w;
+  w.thread = "Thread 1 (main)";
+  w.objects = {{"C:\\Users\\ann\\data.bin", 100.0}};
+  r.waits.push_back(w);
+  r.quality.pdbNextToExe = "C:\\Users\\ann\\src\\slowapp.pdb";
+  RedactReport(r, red);
+  const std::string json = RenderJson(r) + RenderText(r);
+  ExpectEq("no user folder left", json.find("Users") == std::string::npos && json.find("ann") == std::string::npos, 1);
+  ExpectStr("object kept by name", r.waits[0].objects[0].first, "...\\data.bin");
+}
+
 void CheckDiff() {
   std::printf("Comparing two reports (W35)\n");
   const std::string fixed = R"js({"schema": "waitwhy-report/1", "program": "slowapp.exe",
@@ -589,6 +612,7 @@ int main() {
   CheckWakerRefinesDisk();
   CheckDiff();
   CheckBucketCap();
+  CheckRedact();
   std::printf(Failures() ? "%d check(s) failed.\n" : "All checks passed.\n", Failures());
   return Failures() ? 1 : 0;
 }
