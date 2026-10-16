@@ -40,12 +40,14 @@ Biggest waits
       Woken by   : Thread 2 (saver)
       Wait reason: WrAlertByThreadId (kernel code 37)
 
-  #5  Thread 2 (saver)  waited 3.00 s (30% of the time) over 1 wait(s)
+  #5  Thread 2 (saver)  waited 3.00 s (30% of the time) over 2 wait(s)
       Waiting on : the disk (file read/write/flush)
       Your code  : slowapp!`anonymous namespace'::write_settings_to_disk
-      Blocked in : KERNELBASE!WriteFile
+      Blocked in : KERNELBASE!WriteFile (93%), KERNELBASE!FlushFileBuffers (7%)
       Woken by   : the system (a timer or finished I/O)
       Wait reason: Executive (kernel code 0)
+
+  (1 smaller group(s) of waits not shown, 2 ms in total; --top and --min-ms choose what is shown)
 
 What this means
   * Thread 2 (saver) spent 30% of the time waiting for the disk, in slowapp!`anonymous namespace'::write_settings_to_disk.
@@ -54,4 +56,4 @@ What this means
     It is most likely holding the lock during that slow work. Move the
     slow work outside the lock (copy the data first, then do the work).
 
-(12345 context switches seen, 3 waits with a call stack, 0 waits without a call stack, 1 kernel-only stack parts)
+(12345 context switches seen, 5 waits with a call stack, 0 waits without a call stack, 1 kernel-only stack parts)

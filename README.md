@@ -48,7 +48,10 @@ If your disk is very fast and the buggy numbers look small, start slowapp with m
 ```powershell
 .\waitwhy.exe --name notepad.exe --seconds 10
 .\waitwhy.exe --pid 1234 --top 10
+.\waitwhy.exe --pid 1234 --min-ms 0
 ```
+
+Each row of "Biggest waits" is one activity: all of a thread's waits on the same kind of thing (a lock, the disk, ...) in the same function of your code, whatever system functions they went through. `--top N` shows the N biggest (default 6); `--min-ms N` hides rows smaller than N milliseconds (default 10). What is left out is counted on one line.
 
 To see the raw kernel events behind a report, add `--dump-events FILE`. It writes one line per context switch, ready-thread, thread and call-stack event of the program's threads, in the order Windows delivered them, then the names of every function and thread the report uses, and still prints the normal report. The dump holds everything needed to rebuild the report without Windows, so attach it to a bug report. The format is described at the top of `dump.h`:
 

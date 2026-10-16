@@ -585,11 +585,12 @@ void WriteDumpNames(FILE* out, Symbolizer& sym, bool symbolsOk) {
 // Report
 // ---------------------------------------------------------------------------
 
-void PrintReport(double ticksPerSecond, int topN, const SessionProps& stopped, bool stacksOn,
-                 Symbolizer& sym, bool symbolsOk) {
+void PrintReport(double ticksPerSecond, int topN, double minMs, const SessionProps& stopped,
+                 bool stacksOn, Symbolizer& sym, bool symbolsOk) {
   ReportOptions opt;
   opt.ticksPerSecond = ticksPerSecond;
   opt.topN = static_cast<size_t>(topN);
+  opt.minMs = minMs;
   opt.eventsLost = stopped.props.EventsLost;
   opt.buffersLost = stopped.props.RealTimeBuffersLost;
   opt.stacksOn = stacksOn;
@@ -601,7 +602,7 @@ void PrintReport(double ticksPerSecond, int topN, const SessionProps& stopped, b
 
 // Rebuilds the report from a version 2 dump (W18, W19), with no kernel trace and without the
 // program: everything it needs, including the names, is in the dump.
-int ReportFromDump(const std::wstring& path, int topN) {
+int ReportFromDump(const std::wstring& path, int topN, double minMs) {
   std::ifstream in(std::filesystem::path(path), std::ios::binary);
   const std::vector<DumpLine> lines = ReadDump(in);
   if (lines.empty()) {
@@ -618,6 +619,7 @@ int ReportFromDump(const std::wstring& path, int topN) {
   ReportOptions opt;
   opt.ticksPerSecond = info.ticksPerSecond > 0 ? info.ticksPerSecond : 1e7;
   opt.topN = static_cast<size_t>(topN);
+  opt.minMs = minMs;
   opt.eventsLost = info.eventsLost;
   opt.buffersLost = info.buffersLost;
   opt.stacksOn = info.stacksOn;
@@ -635,13 +637,15 @@ int ReportFromDump(const std::wstring& path, int topN) {
 void Usage() {
   std::printf(
       "usage: waitwhy (--pid N | --name program.exe) [--seconds N] [--top N]\n"
-      "               [--dump-events FILE]\n"
-      "       waitwhy --from-dump FILE [--top N]\n"
+      "               [--min-ms N] [--dump-events FILE]\n"
+      "       waitwhy --from-dump FILE [--top N] [--min-ms N]\n"
       "  Watches a running program and reports what its threads were waiting on.\n"
       "  --dump-events also writes every context-switch, ready-thread, thread and stack\n"
       "  event of the program's threads to FILE, one line each, in the order they\n"
       "  arrived, then the names the report uses. Must be run as Administrator.\n"
       "  --from-dump prints the report again from such a FILE, on any machine.\n"
+      "  --top N shows the N biggest groups of waits (default 6); --min-ms N hides\n"
+      "  groups smaller than N milliseconds (default 10).\n"
       "  Exit codes: 0 report printed, 1 bad arguments or program not found,\n"
       "  2 the kernel trace could not be started (not Administrator, or unavailable).\n");
 }
@@ -659,6 +663,7 @@ int wmain(int argc, wchar_t** argv) {
   std::wstring fromDump;
   int seconds = 10;
   int topN = 6;
+  double minMs = 10.0;
   for (int i = 1; i < argc; ++i) {
     std::wstring a = argv[i];
     bool hasValue = i + 1 < argc;
@@ -670,6 +675,8 @@ int wmain(int argc, wchar_t** argv) {
       seconds = (std::max)(1, _wtoi(argv[++i]));
     } else if (a == L"--top" && hasValue) {
       topN = (std::max)(1, _wtoi(argv[++i]));
+    } else if (a == L"--min-ms" && hasValue) {
+      minMs = (std::max)(0.0, std::wcstod(argv[++i], nullptr));
     } else if (a == L"--dump-events" && hasValue) {
       dumpPath = argv[++i];
     } else if (a == L"--from-dump" && hasValue) {
@@ -684,7 +691,7 @@ int wmain(int argc, wchar_t** argv) {
       Usage();
       return kExitUsage;
     }
-    return ReportFromDump(fromDump, topN);
+    return ReportFromDump(fromDump, topN, minMs);
   }
   if (!name.empty() && !FindProcessByName(name, &pid)) {
     std::printf("No running process named %s.\n", Narrow(name).c_str());
@@ -814,7 +821,7 @@ int wmain(int argc, wchar_t** argv) {
     std::printf("Wrote %llu events to %s.\n", static_cast<unsigned long long>(g_dumpLines),
                 Narrow(dumpPath).c_str());
   }
-  PrintReport(static_cast<double>(freq.QuadPart), topN, stopped, stacksOn, sym, symbolsOk);
+  PrintReport(static_cast<double>(freq.QuadPart), topN, minMs, stopped, stacksOn, sym, symbolsOk);
   return kExitOk;
 }
 #endif  // WAITWHY_NO_MAIN

@@ -229,3 +229,6 @@ Newest line last. Format: `YYYY-MM-DD  ID  status  note`.
 - 2026-10-16  W20  started  Window from QPC before the trace reader starts to QPC before the session stops; earlier events clamped to the window; thread shares are of each thread's lifetime in the window.
 - 2026-10-16  W20  started  Follow-up from CI run #66 (8.42 s window, shares up to 101%): watch until a QPC deadline instead of counting 100 ms sleeps; context-switch, ready and thread events stamped after the window are not counted.
 - 2026-10-16  W21  started  Idle threads (ran at most 1% of their lifetime, no wait in the program's code, every wait a wait for work) are counted on one line and left out of the tables and findings.
+- 2026-10-16  W20  confirmed  CI run #68: "watched for 8.01 s" for --seconds 8 (was 9.06 s); no share above 100%.
+- 2026-10-16  W21  confirmed  CI run #68: the idle thread-pool worker is one line under the thread table in both runs and no longer a finding.
+- 2026-10-16  W22  started  Rows group waits by (thread, category, function in the program's code); blocking functions listed with shares; dominant known wait reason shown; --min-ms (default 10) and --top leftovers counted on one line.

@@ -11,6 +11,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <functional>
+#include <map>
+#include <tuple>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -22,6 +24,7 @@ namespace waitwhy {
 struct ReportOptions {
   double ticksPerSecond = 1.0;
   size_t topN = 6;
+  double minMs = 10.0;  // smaller groups of waits are counted, not shown (W22)
   uint64_t eventsLost = 0;
   uint64_t buffersLost = 0;
   bool stacksOn = true;
@@ -49,9 +52,11 @@ struct WaitRow {
   bool stillWaitingAtEnd = false;
   Category category = Category::Other;
   std::string yourCode;
-  std::string blockedIn;
+  // The system functions it was blocked in, with their share of the row's wait time, largest
+  // first (W22).
+  std::vector<std::pair<std::string, double>> blockedIn;
   std::string wokenBy;
-  int8_t reason = 0;
+  int8_t reason = 0;  // the known kernel wait reason with the most time; kReasonUnknown if none
 };
 
 // One line of "What this means", with what explains it.
@@ -79,7 +84,9 @@ struct Report {
   int unseenThreads = 0;  // never ran during the window
   std::vector<uint32_t> idleThreads;  // only waited for work outside the program (W21)
   bool anyWaits = false;
-  std::vector<WaitRow> waits;  // the biggest, at most topN
+  std::vector<WaitRow> waits;  // the biggest, at most topN, none under minMs
+  size_t hiddenWaitRows = 0;   // rows left out by minMs or topN
+  double hiddenWaitSeconds = 0;
   std::vector<Finding> findings;
   uint64_t contextSwitches = 0;
   uint64_t waitsWithStack = 0;
@@ -92,6 +99,29 @@ inline std::string WakerLabel(const Analyzer& an, uint32_t tid, const ThreadName
   if (an.IsProgramThread(tid)) return name(tid);
   if (tid == kSystemWaker) return "the system (a timer or finished I/O)";
   return "outside your program (thread " + std::to_string(tid) + ")";
+}
+
+// All waits of one thread on one kind of thing at one place in the program's code (W22): one
+// activity, however many call stacks and wait reasons it took.
+struct WaitGroup {
+  uint32_t tid = 0;
+  Category category = Category::Other;
+  std::string yourCode;
+  uint64_t ticks = 0;
+  uint32_t count = 0;
+  bool stillWaitingAtEnd = false;
+  bool anyStack = false;
+  std::map<uint32_t, uint64_t> wakers;
+  std::map<int8_t, uint64_t> reasons;
+  std::map<std::string, uint64_t> blockedIn;
+};
+
+inline uint32_t TopWaker(const WaitGroup& g) {
+  uint32_t best = kUnknownThread;
+  uint64_t bestTicks = 0;
+  for (const auto& [tid, t] : g.wakers)
+    if (t > bestTicks) best = tid, bestTicks = t;
+  return best;
 }
 
 inline Report BuildReport(const Analyzer& an, SymbolSource& sym, const ReportOptions& opt,
@@ -170,56 +200,82 @@ inline Report BuildReport(const Analyzer& an, SymbolSource& sym, const ReportOpt
     r.threads.push_back(row);
   }
 
-  // Biggest waits. Buckets are in key order, and the sort keeps ties in that order.
-  std::vector<const Bucket*> buckets;
-  for (const auto& [key, b] : an.buckets)
-    if (!idle(b.tid)) buckets.push_back(&b);
-  std::stable_sort(buckets.begin(), buckets.end(),
-                   [](const Bucket* x, const Bucket* y) { return x->ticks > y->ticks; });
-  r.anyWaits = !buckets.empty();
-  std::unordered_map<const Bucket*, Category> category;
-  for (const Bucket* b : buckets) category[b] = Classify(*b, sym);
-  for (size_t i = 0; i < buckets.size() && i < opt.topN; ++i) {
-    const Bucket& b = *buckets[i];
+  // Group the waits by activity (W22). The map keeps groups in a fixed order, and the sort keeps
+  // ties in that order.
+  std::map<std::tuple<uint32_t, int, std::string>, WaitGroup> groupMap;
+  for (const auto& [key, b] : an.buckets) {
+    if (idle(b.tid)) continue;
+    const Category c = Classify(b, sym);
+    const std::string code = YourCodeFrame(b, sym);
+    WaitGroup& g = groupMap[{b.tid, static_cast<int>(c), code}];
+    g.tid = b.tid;
+    g.category = c;
+    g.yourCode = code;
+    g.ticks += b.ticks;
+    g.count += b.count;
+    g.stillWaitingAtEnd = g.stillWaitingAtEnd || b.stillWaitingAtEnd;
+    g.anyStack = g.anyStack || !b.stack.empty();
+    for (const auto& [waker, t] : b.wakers) g.wakers[waker] += t;
+    g.reasons[b.reason] += b.ticks;
+    g.blockedIn[BlockedInFrame(b, sym)] += b.ticks;
+  }
+  std::vector<const WaitGroup*> groups;
+  for (const auto& [key, g] : groupMap) groups.push_back(&g);
+  std::stable_sort(groups.begin(), groups.end(),
+                   [](const WaitGroup* x, const WaitGroup* y) { return x->ticks > y->ticks; });
+  r.anyWaits = !groups.empty();
+
+  const double minTicks = opt.minMs / 1000.0 * opt.ticksPerSecond;
+  for (const WaitGroup* g : groups) {
+    if (r.waits.size() >= opt.topN || static_cast<double>(g->ticks) < minTicks) {
+      ++r.hiddenWaitRows;
+      r.hiddenWaitSeconds += secs(g->ticks);
+      continue;
+    }
     WaitRow w;
-    w.tid = b.tid;
-    w.thread = name(b.tid);
-    w.seconds = secs(b.ticks);
-    w.pct = pct(b.tid, b.ticks);
-    w.count = b.count;
-    w.stillWaitingAtEnd = b.stillWaitingAtEnd;
-    w.category = category[&b];
-    w.yourCode = YourCodeFrame(b, sym);
-    w.blockedIn = BlockedInFrame(b, sym);
-    w.wokenBy = WakerLabel(an, TopWaker(b), name);
-    w.reason = b.reason;
+    w.tid = g->tid;
+    w.thread = name(g->tid);
+    w.seconds = secs(g->ticks);
+    w.pct = pct(g->tid, g->ticks);
+    w.count = g->count;
+    w.stillWaitingAtEnd = g->stillWaitingAtEnd;
+    w.category = g->category;
+    w.yourCode = g->yourCode;
+    for (const auto& [fn, t] : g->blockedIn)
+      w.blockedIn.emplace_back(fn, g->ticks ? 100.0 * static_cast<double>(t) / static_cast<double>(g->ticks) : 0.0);
+    std::stable_sort(w.blockedIn.begin(), w.blockedIn.end(),
+                     [](const auto& x, const auto& y) { return x.second > y.second; });
+    w.wokenBy = WakerLabel(an, TopWaker(*g), name);
+    w.reason = kReasonUnknown;
+    uint64_t best = 0;
+    for (const auto& [reason, t] : g->reasons)
+      if (reason != kReasonUnknown && (w.reason == kReasonUnknown || t > best)) w.reason = reason, best = t;
     r.waits.push_back(w);
   }
 
   // Plain-English findings.
   for (uint32_t tid : tids) {
-    for (const Bucket* b : buckets) {
-      if (b->tid != tid) continue;
-      const Category c = category[b];
-      if (c == Category::Sleep || pct(tid, b->ticks) < 10.0) continue;
+    for (const WaitGroup* g : groups) {
+      if (g->tid != tid) continue;
+      const Category c = g->category;
+      if (c == Category::Sleep || pct(tid, g->ticks) < 10.0) continue;
       Finding f;
       f.tid = tid;
       f.thread = name(tid);
-      f.pct = pct(tid, b->ticks);
+      f.pct = pct(tid, g->ticks);
       f.category = c;
-      f.yourCode = YourCodeFrame(*b, sym);
-      const uint32_t waker = TopWaker(*b);
+      f.yourCode = g->yourCode;
+      const uint32_t waker = TopWaker(*g);
       if (c == Category::Lock && an.IsProgramThread(waker) && waker != tid) {
         // What was the thread that released the lock busy with?
-        for (const Bucket* wb : buckets) {
-          if (wb->tid != waker) continue;
-          const Category wc = category[wb];
-          if (wc == Category::Lock || wc == Category::Sleep) continue;
-          if (wb->stack.empty()) continue;  // nothing to say about where its time went
+        for (const WaitGroup* wg : groups) {
+          if (wg->tid != waker) continue;
+          if (wg->category == Category::Lock || wg->category == Category::Sleep) continue;
+          if (!wg->anyStack) continue;  // nothing to say about where its time went
           f.hasReleaser = true;
           f.releaser = name(waker);
-          f.releaserCategory = wc;
-          f.releaserCode = YourCodeFrame(*wb, sym);
+          f.releaserCategory = wg->category;
+          f.releaserCode = wg->yourCode;
           break;
         }
       }
@@ -294,13 +350,25 @@ inline std::string RenderText(const Report& r) {
             w.stillWaitingAtEnd ? ", still waiting at the end" : "");
     Appendf(out, "      Waiting on : %s\n", CategoryLabel(w.category));
     Appendf(out, "      Your code  : %s\n", w.yourCode.c_str());
-    Appendf(out, "      Blocked in : %s\n", w.blockedIn.c_str());
+    // One system function, or the main ones with their shares.
+    std::string blocked;
+    for (size_t k = 0; k < w.blockedIn.size() && k < 3; ++k) {
+      if (k) blocked += ", ";
+      blocked += w.blockedIn[k].first;
+      if (w.blockedIn.size() > 1) Appendf(blocked, " (%.0f%%)", w.blockedIn[k].second);
+    }
+    if (w.blockedIn.size() > 3) Appendf(blocked, ", %zu more", w.blockedIn.size() - 3);
+    Appendf(out, "      Blocked in : %s\n", blocked.c_str());
     Appendf(out, "      Woken by   : %s\n", w.wokenBy.c_str());
     if (w.reason == kReasonUnknown)
       Appendf(out, "      Wait reason: not known (already blocked when the trace started)\n");
     else
       Appendf(out, "      Wait reason: %s (kernel code %d)\n", WaitReasonName(w.reason), w.reason);
   }
+
+  if (r.hiddenWaitRows)
+    Appendf(out, "\n  (%zu smaller group(s) of waits not shown, %s in total; --top and --min-ms choose what is shown)\n",
+            r.hiddenWaitRows, FormatDuration(r.hiddenWaitSeconds).c_str());
 
   Appendf(out, "\nWhat this means\n");
   for (const Finding& f : r.findings) {

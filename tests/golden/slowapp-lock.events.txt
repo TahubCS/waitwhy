@@ -1,7 +1,8 @@
 # Hand-written version 2 dump (W18) for the golden report test (W19). Ticks are milliseconds.
-# Buggy slowapp in miniature: saver (2) writes to disk for 3 s while holding the lock that
-# main (1) waits for in update_frame; ticker (3) sleeps; thread 4 is an idle thread-pool
-# worker that never runs. Tracing runs from 1000 to 11000, 10 s.
+# Buggy slowapp in miniature: saver (2) writes to disk for 3 s (WriteFile, then
+# FlushFileBuffers, then a 2 ms CloseHandle) while holding the lock that main (1) waits for in
+# update_frame; ticker (3) sleeps; thread 4 is an idle thread-pool worker that never runs.
+# Tracing runs from 1000 to 11000, 10 s.
 DUMP version=2 pid=7 ticksPerSecond=1000
 TARGET tid=1
 TARGET tid=2
@@ -11,10 +12,18 @@ WINDOW ts=1000
 CSWITCH ts=1000 cpu=0 old=2 new=0 oldState=5 oldReason=0
 CSWITCH ts=1001 cpu=1 old=1 new=0 oldState=5 oldReason=37
 CSWITCH ts=1002 cpu=2 old=3 new=0 oldState=5 oldReason=4
-READY ts=4000 cpu=0 readied=2 headerThread=0 flag=0x01 by=0
-CSWITCH ts=4000 cpu=0 old=0 new=2 oldState=2 oldReason=0
-STACK ts=4000 eventTs=4000 tid=2 kernelFrames=5 userFrames=0 firstUser=0x0
-STACK ts=4001 eventTs=4000 tid=2 kernelFrames=0 userFrames=5 firstUser=0x7ff600002000 frames=0x7ff600002000,0x7ff600002010,0x7ff600002020,0x7ff600002030,0x7ff600002040
+READY ts=3800 cpu=0 readied=2 headerThread=0 flag=0x01 by=0
+CSWITCH ts=3800 cpu=0 old=0 new=2 oldState=2 oldReason=0
+STACK ts=3800 eventTs=3800 tid=2 kernelFrames=5 userFrames=0 firstUser=0x0
+STACK ts=3801 eventTs=3800 tid=2 kernelFrames=0 userFrames=5 firstUser=0x7ff600002000 frames=0x7ff600002000,0x7ff600002010,0x7ff600002020,0x7ff600002030,0x7ff600002040
+CSWITCH ts=3801 cpu=0 old=2 new=0 oldState=5 oldReason=0
+READY ts=4001 cpu=0 readied=2 headerThread=0 flag=0x01 by=0
+CSWITCH ts=4001 cpu=0 old=0 new=2 oldState=2 oldReason=0
+STACK ts=4002 eventTs=4001 tid=2 kernelFrames=0 userFrames=5 firstUser=0x7ff600002100 frames=0x7ff600002100,0x7ff600002110,0x7ff600002020,0x7ff600002030,0x7ff600002040
+CSWITCH ts=4002 cpu=0 old=2 new=0 oldState=5 oldReason=0
+READY ts=4004 cpu=0 readied=2 headerThread=0 flag=0x01 by=0
+CSWITCH ts=4004 cpu=0 old=0 new=2 oldState=2 oldReason=0
+STACK ts=4005 eventTs=4004 tid=2 kernelFrames=0 userFrames=5 firstUser=0x7ff600002200 frames=0x7ff600002200,0x7ff600002210,0x7ff600002020,0x7ff600002030,0x7ff600002040
 READY ts=4010 cpu=0 readied=1 headerThread=2 flag=0x00 by=2
 CSWITCH ts=4010 cpu=0 old=2 new=1 oldState=5 oldReason=4
 STACK ts=4011 eventTs=4010 tid=1 kernelFrames=0 userFrames=7 firstUser=0x7ff600001000 frames=0x7ff600001000,0x7ff600001010,0x7ff600001020,0x7ff600001030,0x7ff600001040,0x7ff600001050,0x7ff600001060
@@ -44,6 +53,10 @@ SYMBOL addr=0x7ff600002010 name=KERNELBASE!WriteFile
 SYMBOL addr=0x7ff600002020 name=slowapp!`anonymous namespace'::write_settings_to_disk
 SYMBOL addr=0x7ff600002030 name=slowapp!`anonymous namespace'::save_settings
 SYMBOL addr=0x7ff600002040 name=slowapp!`anonymous namespace'::saver_thread
+SYMBOL addr=0x7ff600002100 name=ntdll!NtFlushBuffersFile
+SYMBOL addr=0x7ff600002110 name=KERNELBASE!FlushFileBuffers
+SYMBOL addr=0x7ff600002200 name=ntdll!NtClose
+SYMBOL addr=0x7ff600002210 name=KERNELBASE!CloseHandle
 SYMBOL addr=0x7ff600003000 name=ntdll!NtDelayExecution
 SYMBOL addr=0x7ff600003010 name=KERNELBASE!SleepEx
 SYMBOL addr=0x7ff600003020 name=slowapp!`anonymous namespace'::ticker_thread
