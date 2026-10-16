@@ -217,3 +217,5 @@ Newest line last. Format: `YYYY-MM-DD  ID  status  note`.
 - 2026-10-16  W15–W40  proposed  From the build-out plan of 2026-10-16.
 - 2026-10-16  W15–W40  approved  By the user, together with the plan. The user also asked for commits straight to main as TahubCS, without PRs.
 - 2026-10-16  W15  started  analysis.h holds the state machine, stack matcher and buckets; waitwhy.cpp decodes into it. Replay test is portable and runs on Linux CI; tests/decode_tests.cpp replays through OnEvent on Windows.
+- 2026-10-16  W15  confirmed  CI run #61: replay counts unchanged through the analysis core and through OnEvent; smoke test passes; Linux job green.
+- 2026-10-16  W16  started  Classify, IsRuntimeFrame, YourCodeFrame, BlockedInFrame and TopWaker moved into analysis.h behind SymbolSource; tests/analysis_tests.cpp checks each rule.

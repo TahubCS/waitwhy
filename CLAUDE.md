@@ -44,9 +44,10 @@ was stuck in (DbgHelp + .pdb); and which thread woke it up.
 | `FEATURES.md` | Append-only record of core features, decisions and work items. Read it before planning any change. |
 | `TRACE-FINDINGS.md` | Analysis of a real captured trace (`docs/traces/`): how stacks arrive, the evidence behind W14. |
 | `docs/traces/` | Captured `--dump-events` files and their reports, kept byte for byte as test fixtures. |
-| `analysis.h` | The analysis core (D7): typed events, thread state machine, stack matcher, buckets. Header-only, no Win32 calls; included by `waitwhy.cpp`. |
+| `analysis.h` | The analysis core (D7): typed events, thread state machine, stack matcher, buckets, classification rules (behind `SymbolSource`). Header-only, no Win32 calls; included by `waitwhy.cpp`. |
 | `tests/replay_events.cpp` | Replays a dump through the analysis core and checks stack matching. Portable: runs in CI on Windows and Linux. |
 | `tests/decode_tests.cpp` | Replays a dump through waitwhy's ETW decoding (includes `waitwhy.cpp` with `WAITWHY_NO_MAIN`). Windows CI. |
+| `tests/analysis_tests.cpp` | Unit tests for the analysis core: classification rules, frame choice, small event sequences. Portable. |
 | `tests/dump_reader.h` | Dump-file reader and check helpers shared by the tests. |
 | `LICENSE` | MIT (D11). |
 | `ROADMAP.md` | Proposed phased plan towards a tool others can rely on (`R` items, open decisions `X`). A proposal, not approved; `FEATURES.md` wins on any conflict. |

@@ -28,6 +28,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "tests\replay_events.cpp did not compile" }
           cl /nologo /EHsc /O2 /std:c++17 /DWAITWHY_NO_MAIN tests\decode_tests.cpp /Fe:decode_tests.exe
           if ($LASTEXITCODE -ne 0) { throw "tests\decode_tests.cpp did not compile" }
+          cl /nologo /EHsc /O2 /std:c++17 tests\analysis_tests.cpp /Fe:analysis_tests.exe
+          if ($LASTEXITCODE -ne 0) { throw "tests\analysis_tests.cpp did not compile" }
+
+      - name: Unit tests
+        shell: pwsh
+        run: |
+          .\analysis_tests.exe
+          if ($LASTEXITCODE -ne 0) { throw "tests\analysis_tests.cpp failed" }
 
       # Replays a recorded trace through the analysis core, and through waitwhy's ETW decoding;
       # needs no kernel trace.
@@ -97,6 +105,8 @@ jobs:
           set -e
           for cxx in g++ clang++; do
             echo "::group::$cxx"
+            $cxx -std=c++17 -O2 -Wall -Wextra -Wshadow -Werror tests/analysis_tests.cpp -o analysis_tests
+            ./analysis_tests
             $cxx -std=c++17 -O2 -Wall -Wextra -Wshadow -Werror tests/replay_events.cpp -o replay_events
             ./replay_events docs/traces/buggy-64mb-events.txt
             echo "::endgroup::"

@@ -1,5 +1,6 @@
 // analysis.h - waitwhy's analysis core (D7): turns typed kernel events into per-thread time
-// splits and buckets of waits with their call stacks and wakers.
+// splits and buckets of waits with their call stacks and wakers, and classifies the waits from
+// the names of their stack frames.
 //
 // It makes no Windows calls, so tests can drive it with recorded or hand-written events on
 // any machine, without a kernel trace or Administrator rights. waitwhy.cpp decodes the ETW
@@ -9,9 +10,13 @@
 #define WAITWHY_ANALYSIS_H
 
 #include <algorithm>
+#include <cctype>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <initializer_list>
 #include <map>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -363,6 +368,163 @@ class Analyzer {
     exitedThreads.insert(e.tid);
   }
 };
+
+// ---------------------------------------------------------------------------
+// Symbols: what the classification rules need to know about an address
+// ---------------------------------------------------------------------------
+
+// Names code addresses. waitwhy.cpp implements it with DbgHelp; tests use a fixed table.
+class SymbolSource {
+ public:
+  virtual ~SymbolSource() = default;
+  // "module!function", or "module!0x1234" when no name is available.
+  virtual const std::string& Name(uint64_t addr) = 0;
+  // Lower-case path of the source file the code at `addr` came from, with backslashes; empty
+  // when there is no line information for it.
+  virtual const std::string& SourceFile(uint64_t addr) = 0;
+  // True when `name` (as returned by Name) is in the program's own executable.
+  virtual bool IsExeFrame(const std::string& name) const = 0;
+};
+
+inline std::string Lower(std::string s) {
+  for (char& ch : s) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+  return s;
+}
+
+// ---------------------------------------------------------------------------
+// Turning stacks into plain English
+// ---------------------------------------------------------------------------
+
+enum class Category { Lock, Disk, Network, Sleep, OtherThread, PageFault, Other };
+
+inline const char* CategoryLabel(Category c) {
+  switch (c) {
+    case Category::Lock: return "a lock held by another thread";
+    case Category::Disk: return "the disk (file read/write/flush)";
+    case Category::Network: return "the network";
+    case Category::Sleep: return "an intentional sleep or timer";
+    case Category::OtherThread: return "another thread or an event";
+    case Category::PageFault: return "memory being loaded from disk";
+    default: return "something else";
+  }
+}
+
+inline const char* CategorySentence(Category c) {
+  switch (c) {
+    case Category::Lock: return "waiting for a lock that another thread was holding";
+    case Category::Disk: return "waiting for the disk";
+    case Category::Network: return "waiting for the network";
+    case Category::Sleep: return "sleeping on purpose";
+    case Category::OtherThread: return "waiting for another thread or an event to signal it";
+    case Category::PageFault: return "waiting for memory to be loaded from disk";
+    default: return "waiting";
+  }
+}
+
+inline const char* WaitReasonName(int8_t r) {
+  static const char* names[] = {
+      "Executive", "FreePage", "PageIn", "PoolAllocation", "DelayExecution", "Suspended",
+      "UserRequest", "WrExecutive", "WrFreePage", "WrPageIn", "WrPoolAllocation",
+      "WrDelayExecution", "WrSuspended", "WrUserRequest", "WrSpare0", "WrQueue",
+      "WrLpcReceive", "WrLpcReply", "WrVirtualMemory", "WrPageOut", "WrRendezvous",
+      "WrKeyedEvent", "WrTerminated", "WrProcessInSwap", "WrCpuRateControl", "WrCalloutStack",
+      "WrKernel", "WrResource", "WrPushLock", "WrMutex", "WrQuantumEnd", "WrDispatchInt",
+      "WrPreempted", "WrYieldExecution", "WrFastMutex", "WrGuardedMutex", "WrRundown",
+      "WrAlertByThreadId"};
+  if (r >= 0 && r < static_cast<int8_t>(sizeof names / sizeof names[0])) return names[r];
+  return "unknown";
+}
+
+inline bool HasAny(const std::string& text, std::initializer_list<const char*> words) {
+  for (const char* w : words)
+    if (text.find(w) != std::string::npos) return true;
+  return false;
+}
+
+inline Category Classify(const Bucket& b, SymbolSource& sym) {
+  std::string all;
+  for (uint64_t a : b.stack) all += Lower(sym.Name(a)) + "\n";
+  if (HasAny(all, {"!readfile", "!writefile", "!flushfilebuffers", "!ntreadfile",
+                   "!ntwritefile", "!ntflushbuffersfile", "!createfile", "!ntcreatefile"}))
+    return Category::Disk;
+  if (HasAny(all, {"!recv", "!wsarecv", "!send\n", "!wsasend", "!select", "!connect",
+                   "!accept", "!wsapoll", "!getaddrinfo", "!winhttp", "!internetread"}))
+    return Category::Network;
+  if (HasAny(all, {"!sleep\n", "!sleepex\n", "!ntdelayexecution"}) || b.reason == 4 ||
+      b.reason == 11)
+    return Category::Sleep;
+  // The program's own calls into the C++ runtime and the lock APIs say more than the
+  // innermost frames: ntdll often resolves only to its nearest exported name, so a blocked
+  // AcquireSRWLockExclusive can show up as RtlSleepConditionVariableSRW. A condition variable
+  // wait also names its mutex, so it is checked first.
+  if (HasAny(all, {"condition_variable", "cnd_wait"})) return Category::OtherThread;
+  if (HasAny(all, {"mutex::lock", "mtx_lock", "mtx_do_lock", "acquiresrwlockexclusive",
+                   "acquiresrwlockshared", "entercriticalsection"}))
+    return Category::Lock;
+  if (HasAny(all, {"sleepconditionvariable", "!waitforsingleobject", "!waitformultipleobjects",
+                   "::join", "!getqueuedcompletionstatus", "_thrd_join"}))
+    return Category::OtherThread;
+  if (HasAny(all, {"srwlock", "criticalsection", "mtx_lock", "mutex"}) || b.reason == 21 ||
+      b.reason == 37)
+    return Category::Lock;
+  if (b.reason == 2 || b.reason == 9) return Category::PageFault;
+  if (b.reason == 6 || b.reason == 13) return Category::OtherThread;
+  return Category::Other;
+}
+
+// True for C++ runtime and standard library code that the linker copied into the exe
+// (std::mutex::lock, _Mtx_lock, mtx_do_lock, the CRT's thread and main startup code). The
+// source path decides when the .pdb has line information; otherwise the name does.
+inline bool IsRuntimeFrame(const std::string& function, const std::string& sourceFile) {
+  for (const char* dir : {"\\vctools\\crt\\", "\\crts\\ucrt\\", "\\vc\\tools\\msvc\\",
+                          "\\windows kits\\"})
+    if (sourceFile.find(dir) != std::string::npos) return true;
+  for (const char* prefix : {"std::", "_", "Concurrency::", "concurrency::", "mtx_do_lock",
+                             "thread_start<", "invoke_main", "mainCRTStartup", "wmainCRTStartup",
+                             "WinMainCRTStartup", "wWinMainCRTStartup"})
+    if (function.rfind(prefix, 0) == 0) return true;
+  return false;
+}
+
+// First frame in the program's own code, skipping the C++ runtime linked into it.
+inline std::string YourCodeFrame(const Bucket& b, SymbolSource& sym) {
+  for (uint64_t a : b.stack) {
+    const std::string& n = sym.Name(a);
+    if (!sym.IsExeFrame(n)) continue;
+    if (IsRuntimeFrame(n.substr(n.find('!') + 1), sym.SourceFile(a))) continue;
+    return n;
+  }
+  return "(not in your program's code)";
+}
+
+// Innermost frame, skipping the raw system-call stubs (ntdll!Nt..., ntdll!Zw...).
+inline std::string BlockedInFrame(const Bucket& b, SymbolSource& sym) {
+  for (uint64_t a : b.stack) {
+    const std::string& n = sym.Name(a);
+    std::string lower = Lower(n);
+    if (lower.rfind("ntdll!nt", 0) == 0 || lower.rfind("ntdll!zw", 0) == 0) continue;
+    return n;
+  }
+  return b.stack.empty() ? "(no call stack recorded)" : sym.Name(b.stack.front());
+}
+
+inline uint32_t TopWaker(const Bucket& b) {
+  uint32_t best = kUnknownThread;
+  uint64_t bestTicks = 0;
+  for (auto& [tid, t] : b.wakers)
+    if (t > bestTicks) best = tid, bestTicks = t;
+  return best;
+}
+
+
+inline std::string FormatDuration(double seconds) {
+  char buf[32];
+  if (seconds >= 1.0)
+    std::snprintf(buf, sizeof buf, "%.2f s", seconds);
+  else
+    std::snprintf(buf, sizeof buf, "%.0f ms", seconds * 1000.0);
+  return buf;
+}
 
 }  // namespace waitwhy
 
