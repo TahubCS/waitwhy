@@ -1047,6 +1047,9 @@ void Usage() {
       "  waitwhy [watch] (--pid N | --name program.exe) [options]\n"
       "      Watch a running program, then report what its threads were waiting on.\n"
       "      Needs an Administrator shell.\n"
+      "  waitwhy [watch] [options] -- program.exe [its arguments]\n"
+      "      Start the program and watch it from its first instruction, until it exits\n"
+      "      (or for --seconds). Needs an Administrator shell.\n"
       "  waitwhy analyze FILE [report options]\n"
       "      Report again from a FILE written by --dump-events, on any machine.\n"
       "      (--from-dump FILE does the same.)\n"
@@ -1071,6 +1074,24 @@ void Usage() {
       kVersion);
 }
 
+// One argument of a command line, quoted the way the C runtime reads it back.
+std::wstring QuoteArgument(const std::wstring& arg) {
+  if (!arg.empty() && arg.find_first_of(L" \t\"") == std::wstring::npos) return arg;
+  std::wstring out = L"\"";
+  size_t backslashes = 0;
+  for (wchar_t ch : arg) {
+    if (ch == L'\\') {
+      ++backslashes;
+      continue;
+    }
+    out.append(ch == L'"' ? backslashes * 2 + 1 : backslashes, L'\\');
+    backslashes = 0;
+    out += ch;
+  }
+  out.append(backslashes * 2, L'\\');
+  return out + L"\"";
+}
+
 // Every error says what to do next (W30).
 int UsageError(const std::string& message) {
   std::printf("%s\nRun 'waitwhy --help' to see the options.\n", message.c_str());
@@ -1089,6 +1110,8 @@ int wmain(int argc, wchar_t** argv) {
   std::wstring dumpPath;
   std::wstring fromDump;
   int seconds = 10;
+  bool secondsGiven = false;
+  std::vector<std::wstring> launch;  // W32: the program to start, after "--"
   ReportOptions shown;  // what the report shows: --top, --min-ms, --stall-ms
   // Command line v1 (W30): an optional command first; without one it means watch.
   int first = 1;
@@ -1117,6 +1140,11 @@ int wmain(int argc, wchar_t** argv) {
   };
   for (int i = first; i < argc; ++i) {
     const std::wstring a = argv[i];
+    if (a == L"--") {
+      launch.assign(argv + i + 1, argv + argc);
+      if (launch.empty()) return UsageError("Give the program to start after --.");
+      break;
+    }
     const bool takesValue = a == L"--pid" || a == L"--name" || a == L"--seconds" || a == L"--top" ||
                             a == L"--min-ms" || a == L"--stall-ms" || a == L"--dump-events" ||
                             a == L"--symbols" || a == L"--from-dump";
@@ -1140,6 +1168,7 @@ int wmain(int argc, wchar_t** argv) {
     } else if (a == L"--seconds") {
       if (!isNumber || n < 1) return UsageError("--seconds needs a whole number of seconds, 1 or more.");
       seconds = static_cast<int>((std::min)(n, 86400.0));
+      secondsGiven = true;
     } else if (a == L"--top") {
       if (!isNumber || n < 1) return UsageError("--top needs a number, 1 or more.");
       shown.topN = static_cast<size_t>(n);
@@ -1162,16 +1191,44 @@ int wmain(int argc, wchar_t** argv) {
       return UsageError("A report from a dump takes no --pid, --name or --dump-events.");
     return ReportFromDump(fromDump, shown);
   }
-  if (pid != 0 && !name.empty()) return UsageError("Give either --pid or --name, not both.");
-  if (pid == 0 && name.empty())
-    return UsageError("Which program? Give its process ID with --pid N or its file name with --name.");
+  if (static_cast<int>(pid != 0) + static_cast<int>(!name.empty()) + static_cast<int>(!launch.empty()) > 1)
+    return UsageError("Give only one of --pid, --name and -- program.");
+  if (pid == 0 && name.empty() && launch.empty())
+    return UsageError("Which program? Give its process ID with --pid N, its file name with --name,\n"
+                      "or start it with: waitwhy [options] -- program.exe [its arguments]");
   if (!name.empty() && !FindProcessByName(name, &pid)) {
     std::printf("No running process is named %s. Check the name on the Details tab of Task Manager,\n"
                 "or give the process ID with --pid.\n",
                 Narrow(name).c_str());
     return kExitUsage;
   }
-  HANDLE target = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+  // Launch mode (W32, D9): the program is created suspended and only resumed once the trace is
+  // running, so its start-up is watched too. Without --seconds it is watched until it exits.
+  PROCESS_INFORMATION launched{};
+  if (!launch.empty()) {
+    std::wstring commandLine;
+    for (const std::wstring& arg : launch) commandLine += (commandLine.empty() ? L"" : L" ") + QuoteArgument(arg);
+    STARTUPINFOW startup{};
+    startup.cb = sizeof startup;
+    if (!CreateProcessW(nullptr, &commandLine[0], nullptr, nullptr, FALSE, CREATE_SUSPENDED, nullptr,
+                        nullptr, &startup, &launched)) {
+      std::printf("Cannot start %s (error %lu). Check the program's path, or give its full path.\n",
+                  Narrow(launch[0]).c_str(), GetLastError());
+      return kExitUsage;
+    }
+    pid = launched.dwProcessId;
+    if (!secondsGiven) seconds = 86400;
+  }
+  // A launched program that never ran is ended again when watching cannot start.
+  auto abandonLaunch = [&launched] {
+    if (!launched.hProcess) return;
+    TerminateProcess(launched.hProcess, 1);
+    CloseHandle(launched.hThread);
+    launched.hThread = nullptr;
+  };
+  HANDLE target = launched.hProcess
+                      ? launched.hProcess
+                      : OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
   if (!target) {
     if (GetLastError() == ERROR_ACCESS_DENIED)
       std::printf("Access to PID %u was denied. Run waitwhy from an Administrator PowerShell window\n"
@@ -1190,6 +1247,7 @@ int wmain(int argc, wchar_t** argv) {
     if (_wfopen_s(&g_dump, dumpPath.c_str(), L"w") != 0) g_dump = nullptr;
     if (!g_dump) {
       std::printf("Cannot write the event dump to %s.\n", Narrow(dumpPath).c_str());
+      abandonLaunch();
       CloseHandle(target);
       return kExitUsage;
     }
@@ -1206,6 +1264,7 @@ int wmain(int argc, wchar_t** argv) {
 
   TRACEHANDLE session = 0;
   ULONG rc = StartKernelSession(&session);
+  if (rc != ERROR_SUCCESS) abandonLaunch();
   if (rc == ERROR_ACCESS_DENIED) {
     std::printf("Access denied. Run waitwhy from an Administrator PowerShell window.\n");
     return kExitTraceUnavailable;
@@ -1226,6 +1285,7 @@ int wmain(int argc, wchar_t** argv) {
   TRACEHANDLE consumer = OpenTraceW(&logfile);
   if (consumer == INVALID_PROCESSTRACE_HANDLE) {
     std::printf("Could not open the trace for reading (error %lu).\n", GetLastError());
+    abandonLaunch();
     StopKernelSession();
     return kExitTraceUnavailable;
   }
@@ -1241,8 +1301,18 @@ int wmain(int argc, wchar_t** argv) {
   }
   std::thread reader([&consumer] { ProcessTrace(&consumer, 1, nullptr, nullptr); });
 
-  std::printf("Watching PID %u (%zu threads) for %d seconds", pid, g_analysis.targetThreads.size(),
-              seconds);
+  if (launched.hThread) {
+    ResumeThread(launched.hThread);
+    CloseHandle(launched.hThread);
+    launched.hThread = nullptr;
+    if (secondsGiven)
+      std::printf("Started %s (PID %u); watching it for %d seconds", Narrow(launch[0]).c_str(), pid, seconds);
+    else
+      std::printf("Started %s (PID %u); watching it until it exits (Ctrl+C stops)", Narrow(launch[0]).c_str(), pid);
+  } else {
+    std::printf("Watching PID %u (%zu threads) for %d seconds", pid, g_analysis.targetThreads.size(),
+                seconds);
+  }
   std::fflush(stdout);
   // Wait for a deadline on the same clock as the events, not for a number of sleeps: each sleep
   // rounds up to the system timer, which made an 8 s run last 8.4 s.
@@ -1279,6 +1349,8 @@ int wmain(int argc, wchar_t** argv) {
   reader.join();
   g_analysis.lastTs = static_cast<uint64_t>(windowEnd.QuadPart);
   CloseTrace(consumer);
+  if (launched.hProcess && !programExited)
+    std::printf("Note: %s is still running; waitwhy leaves it running.\n", Narrow(launch[0]).c_str());
   CloseHandle(target);
   if (g_dump) {
     std::fprintf(g_dump, "END ts=%llu contextSwitches=%llu stacksOn=%d eventsLost=%lu buffersLost=%lu\n",

@@ -250,3 +250,4 @@ Newest line last. Format: `YYYY-MM-DD  ID  status  note`.
 - 2026-10-16  W28  started  Follow-up from CI run #77 (buggy disk row on "a file (name not recorded)"): a blocking thread takes its oldest request still in flight, the program's own call, not the file system's unnamed metadata requests inside it.
 - 2026-10-16  W30  started  Commands watch (default) and analyze FILE, --help and --version (0.9.0); option values checked; every error says what to do next; old forms unchanged.
 - 2026-10-16  W31  started  Private system-logger session waitwhy-<pid> (EVENT_TRACE_SYSTEM_LOGGER_MODE), falling back to NT Kernel Logger with a note; leftover waitwhy-* sessions of dead processes stopped; CI checks a logman NT Kernel Logger session survives.
+- 2026-10-16  W32  started  waitwhy [options] -- program args: created suspended, resumed once the trace runs; watched until it exits unless --seconds is given; left running if still alive. CI smoke gains a launch run.

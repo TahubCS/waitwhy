@@ -45,6 +45,12 @@ If your disk is very fast and the buggy numbers look small, start slowapp with m
 
 ## Use it on any program
 
+To watch a program from its very start (slow start-up), let waitwhy start it: everything after `--` is the program and its arguments. Without `--seconds` it is watched until it exits.
+
+```powershell
+.\waitwhy.exe -- .\slowapp.exe --seconds 6
+```
+
 `waitwhy --help` lists every option and `waitwhy --version` prints the version. The first word may be a command: `watch` (the default, so it can be left out) or `analyze FILE`. Every error says what to do next.
 
 ```powershell
