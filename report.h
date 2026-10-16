@@ -31,6 +31,8 @@ struct ReportOptions {
   bool stacksOn = true;
   bool symbolsOk = true;  // the program could be opened to read function names
   std::string exeFile;    // the program's file name; empty when unknown
+  bool namesFromTrace = false;  // the program had exited; names from its recorded modules (W26)
+  std::string pdbNextToExe;     // a .pdb with the program's name beside it, if any (W26)
 };
 
 // The label of one of the program's threads, e.g. "Thread 37808 (main)".
@@ -108,6 +110,7 @@ struct DataQuality {
   std::vector<std::string> fullModules, exportModules, unnamedModules;
   bool modulesKnown = false;  // the symbol status was recorded
   bool programNamed = true;   // the program's own module has a .pdb (or it is not known)
+  std::string pdbNextToExe;   // set when a .pdb lies beside the program but was not used
 };
 
 inline const char* LevelName(DataQuality::Level l) {
@@ -194,6 +197,8 @@ inline Report BuildReport(const Analyzer& an, SymbolSource& sym, const ReportOpt
     r.warnings.push_back("call stacks were not available, so code locations are missing.");
   if (!opt.symbolsOk)
     r.warnings.push_back("could not open the process to read function names (did it exit?).");
+  if (opt.namesFromTrace)
+    r.warnings.push_back("the program exited during the trace; function names come from the modules it had loaded.");
 
   // Per-thread summary, most waiting first. Ties go by thread ID, so the order never depends
   // on how a hash map happens to be laid out.
@@ -461,7 +466,10 @@ inline Report BuildReport(const Analyzer& an, SymbolSource& sym, const ReportOpt
   else if (q.stackPct < 95) lower(DataQuality::Level::Medium, "some wait time has no call stack");
   if (lostPct > 1) lower(DataQuality::Level::Low, "many events lost");
   else if (opt.eventsLost) lower(DataQuality::Level::Medium, "some events lost");
-  if (!q.programNamed) lower(DataQuality::Level::Low, "no .pdb for the program");
+  if (!q.programNamed)
+    lower(DataQuality::Level::Low,
+          opt.pdbNextToExe.empty() ? "no .pdb for the program" : "the program's .pdb does not match it");
+  q.pdbNextToExe = q.programNamed ? std::string() : opt.pdbNextToExe;
   if (q.wakerKnownPct >= 0 && q.wakerKnownPct < 90)
     lower(DataQuality::Level::Medium, "many wakers unknown");
   if (an.intervalsTruncated) lower(DataQuality::Level::Medium, "wait chains incomplete");
@@ -525,13 +533,16 @@ inline std::string RenderText(const Report& r) {
       Appendf(out, "      Longest    : %s\n", FormatDuration(w.longestSeconds).c_str());
     Appendf(out, "      Your code  : %s\n", w.yourCode.c_str());
     // One system function, or the main ones with their shares.
+    // Functions under 1% of the row are only counted.
     std::string blocked;
-    for (size_t k = 0; k < w.blockedIn.size() && k < 3; ++k) {
-      if (k) blocked += ", ";
+    size_t listed = 0;
+    for (size_t k = 0; k < w.blockedIn.size() && listed < 3; ++k) {
+      if (k > 0 && w.blockedIn[k].second < 1.0) break;
+      if (listed++) blocked += ", ";
       blocked += w.blockedIn[k].first;
       if (w.blockedIn.size() > 1) Appendf(blocked, " (%.0f%%)", w.blockedIn[k].second);
     }
-    if (w.blockedIn.size() > 3) Appendf(blocked, ", %zu more", w.blockedIn.size() - 3);
+    if (w.blockedIn.size() > listed) Appendf(blocked, ", %zu more", w.blockedIn.size() - listed);
     Appendf(out, "      Blocked in : %s\n", blocked.c_str());
     Appendf(out, "      Woken by   : %s\n", w.wokenBy.c_str());
     if (w.reason == kReasonUnknown)
@@ -642,6 +653,9 @@ inline std::string RenderText(const Report& r) {
       Appendf(out, "                     (exported names only: a function that is not exported shows\n"
                    "                     as the nearest exported one, so those names can be wrong)\n");
   }
+  if (!q.pdbNextToExe.empty())
+    Appendf(out, "  Note             : %s does not match the program; build both together (/Zi)\n",
+            q.pdbNextToExe.c_str());
   Appendf(out, "  Context switches : %llu seen\n", static_cast<unsigned long long>(r.contextSwitches));
   return out;
 }

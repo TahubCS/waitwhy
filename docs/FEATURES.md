@@ -238,3 +238,4 @@ Newest line last. Format: `YYYY-MM-DD  ID  status  note`.
 - 2026-10-16  W24  started  Data-quality section with confidence high/medium/low (rules in README), stack coverage by wait time, known-waker share, symbol status per module (MODULE lines in dumps); replaces the counters footer.
 - 2026-10-16  W24  confirmed  CI run #71: golden data-quality section matches; smoke test and rebuilt reports pass.
 - 2026-10-16  W25  started  Each thread keeps its running, ready and waiting intervals (all threads together at most 2^20); lock and other-thread findings show what the waking thread did during exactly those waits, replacing "most likely".
+- 2026-10-16  W25  confirmed  CI run #72: buggy run says saver spent 94% of main's lock waits waiting for the disk in write_settings_to_disk; fixed run has no lock finding.
