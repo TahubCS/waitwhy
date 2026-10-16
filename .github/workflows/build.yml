@@ -110,6 +110,20 @@ jobs:
           if ($exited -notmatch 'the program exited during the trace' -or $exited -notmatch 'slowapp!.*update_frame') {
             $failures += 'Exited run: function names were not found from the modules recorded in the trace.'
           }
+          # W28: the program's file I/O is traced and its files named; saver's file shows as the object.
+          $buggyDump = Get-Content buggy-events.txt -Raw
+          $fileIoLines = ([regex]::Matches($buggyDump, '(?m)^FILEIO ')).Count
+          Write-Host "Buggy dump: $fileIoLines FILEIO lines; FILENAME lines:"
+          [regex]::Matches($buggyDump, '(?m)^FILENAME .*$') | ForEach-Object { Write-Host "  $($_.Value)" }
+          if ($buggyDump -notmatch '(?m)^FILEIO ' -or $buggyDump -notmatch '(?m)^FILENAME .* kind=1 ') {
+            $failures += 'Buggy run: no file I/O or no named file on a disk volume in the event dump.'
+          }
+          if ($buggy -notmatch 'Object     : [A-Za-z]:\\') {
+            $failures += 'Buggy run: no wait row names the file it was writing.'
+          }
+          if ($buggyDump -notmatch '(?m)^FILENAME .* kind=3 ') {
+            Write-Host '::warning::No console file object was named in the buggy run (W28).'
+          }
           if ($symbols -and $symbols -notmatch 'Function names   : full names in [^;\r\n]*ntdll') {
             $failures += 'Symbols run: ntdll has no full names with --symbols ms.'
           }

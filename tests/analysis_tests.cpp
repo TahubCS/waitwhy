@@ -280,6 +280,87 @@ void CheckDurationHistogram() {
   ExpectEq("merged count", merged.count, 101);
 }
 
+// W28: the object a wait was on refines what the function names say about I/O.
+void CheckObjectClassification() {
+  std::printf("Waits classified by the object they were on (W28)\n");
+  ExpectEq("console", static_cast<unsigned long long>(KindOfPath("\\Device\\ConDrv\\Output")),
+           static_cast<unsigned long long>(ObjectKind::Console));
+  ExpectEq("named pipe", static_cast<unsigned long long>(KindOfPath("\\Device\\NamedPipe\\x")),
+           static_cast<unsigned long long>(ObjectKind::Pipe));
+  ExpectEq("socket", static_cast<unsigned long long>(KindOfPath("\\Device\\Afd\\Endpoint")),
+           static_cast<unsigned long long>(ObjectKind::Socket));
+  ExpectEq("file on a volume",
+           static_cast<unsigned long long>(KindOfPath("\\Device\\HarddiskVolume3\\Users\\a.txt")),
+           static_cast<unsigned long long>(ObjectKind::DiskFile));
+  ExpectEq("network share", static_cast<unsigned long long>(KindOfPath("\\Device\\Mup\\server\\x")),
+           static_cast<unsigned long long>(ObjectKind::NetworkFile));
+
+  FakeSymbols sym;
+  const Bucket write = MakeBucket(
+      sym.Stack({"ntdll!NtWriteFile", "KERNELBASE!WriteFile", "slowapp!main"}), 0);
+  ExpectCategory("WriteFile by name alone", Classify(write, sym), Category::Disk);
+  ExpectCategory("WriteFile to the console", Classify(write, sym, ObjectKind::Console),
+                 Category::OtherThread);
+  ExpectCategory("WriteFile to a file", Classify(write, sym, ObjectKind::DiskFile), Category::Disk);
+  const Bucket lock = MakeBucket(
+      sym.Stack({"ntdll!RtlSleepConditionVariableSRW", "slowapp!std::mutex::lock", "slowapp!main"}), 37);
+  ExpectCategory("a lock stays a lock whatever is in flight", Classify(lock, sym, ObjectKind::DiskFile),
+                 Category::Lock);
+  ExpectStr("console described", DescribeObject(ObjectKind::Console, "\\Device\\ConDrv"), "the console window");
+
+  // A thread writes to the console, whose name came from the rundown before it was used.
+  Analyzer an;
+  an.pid = 1;
+  an.targetThreads = {7};
+  FileIoEvent name;
+  name.op = FileIoEvent::Op::Name;
+  name.fileObject = 0xF0;
+  name.kind = ObjectKind::Console;
+  name.path = "\\Device\\ConDrv\\Output";
+  ExpectEq("name of a file the program has not used is kept aside", an.OnFileIo(name), 0);
+  FileIoEvent begin;
+  begin.op = FileIoEvent::Op::Begin;
+  begin.tid = 7;
+  begin.irp = 0x10;
+  begin.fileObject = 0xF0;
+  ExpectEq("the program's request is taken", an.OnFileIo(begin), 1);
+  SwitchEvent e;
+  e.ts = 100;
+  e.oldTid = 7;
+  e.newTid = 0;
+  e.oldState = kThreadStateWaiting;
+  e.oldWaitReason = 0;
+  an.OnSwitch(e);  // blocks with the write in flight
+  FileIoEvent end;
+  end.op = FileIoEvent::Op::End;
+  end.irp = 0x10;
+  ExpectEq("its completion is taken", an.OnFileIo(end), 1);
+  e = SwitchEvent{};
+  e.ts = 150;
+  e.oldTid = 0;
+  e.newTid = 7;
+  an.OnSwitch(e);
+  e = SwitchEvent{};
+  e.ts = 160;
+  e.oldTid = 7;
+  e.newTid = 0;
+  e.oldState = kThreadStateWaiting;
+  e.oldWaitReason = 4;
+  an.OnSwitch(e);  // the next wait has nothing in flight
+  an.lastTs = 200;
+  an.FlushAtEnd();
+  unsigned long long consoleTicks = 0, otherTicks = 0;
+  for (const auto& [key, b] : an.buckets) {
+    const Analyzer::FileName* f = an.FileOf(b.fileObject);
+    if (f && f->kind == ObjectKind::Console) consoleTicks += b.ticks;
+    else otherTicks += b.ticks;
+  }
+  ExpectEq("wait during the console write", consoleTicks, 50);
+  ExpectEq("later wait without the console", otherTicks, 40);
+  ExpectStr("name taken over from the rundown", an.FileOf(0xF0) ? an.FileOf(0xF0)->path : "",
+            "\\Device\\ConDrv\\Output");
+}
+
 }  // namespace
 
 int main() {
@@ -294,6 +375,7 @@ int main() {
   CheckReadySplitsWaitTime();
   CheckWindowAndLifetime();
   CheckDurationHistogram();
+  CheckObjectClassification();
   std::printf(Failures() ? "%d check(s) failed.\n" : "All checks passed.\n", Failures());
   return Failures() ? 1 : 0;
 }

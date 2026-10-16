@@ -20,6 +20,9 @@
 //   NAMES      symbolsOk fromTrace                 names found; fromTrace: from the IMAGE lines (W26)
 //   PDB        file=<path>                         a .pdb beside the program (W26)
 //   IMAGE      ts base size name=<path>            a module the program had loaded (W26)
+//   FILEIO     ts op=0 tid irp fileObject          a file I/O request of the program starts (W28)
+//   FILEIO     ts op=1 irp                         ... and ends
+//   FILENAME   fileObject kind name=<path>         the name of a file object the program used
 //   EXE        name=<file name of the program>
 //   SYMBOL     addr name=<module!function>         every address in the report's stacks
 //   SOURCE     addr file=<source file, lower case>
@@ -260,6 +263,21 @@ class DumpReplay {
       // The live run saw every context switch on the machine, the dump only the program's.
       an_.lastTs = l.Get("ts");
       an_.contextSwitches = l.Get("contextSwitches");
+    } else if (l.kind == "FILEIO") {
+      FileIoEvent e;
+      e.ts = l.Get("ts");
+      e.op = l.Get("op") == 0 ? FileIoEvent::Op::Begin : FileIoEvent::Op::End;
+      e.tid = static_cast<uint32_t>(l.Get("tid", kUnknownThread));
+      e.irp = l.Get("irp");
+      e.fileObject = l.Get("fileObject");
+      an_.OnFileIo(e);
+    } else if (l.kind == "FILENAME") {
+      FileIoEvent e;
+      e.op = FileIoEvent::Op::Name;
+      e.fileObject = l.Get("fileObject");
+      e.kind = static_cast<ObjectKind>(l.Get("kind"));
+      e.path = l.Has("name") ? l.text.at("name") : std::string();
+      an_.OnFileIo(e);
     } else if (l.kind == "SNAPSHOT") {
       an_.ApplySnapshot(static_cast<uint32_t>(l.Get("tid")),
                         l.Has("frames") ? ParseFrames(l.text.at("frames")) : std::vector<uint64_t>{});

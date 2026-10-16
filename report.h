@@ -62,6 +62,8 @@ struct WaitRow {
   std::vector<std::pair<std::string, double>> blockedIn;
   std::string wokenBy;
   int8_t reason = 0;  // the known kernel wait reason with the most time; kReasonUnknown if none
+  // The objects its file I/O was on (W28), with their share of the row, largest first.
+  std::vector<std::pair<std::string, double>> objects;
 };
 
 // What the thread that ended a group of waits was doing during them (W25).
@@ -158,6 +160,7 @@ struct WaitGroup {
   std::map<uint32_t, uint64_t> wakers;
   std::map<int8_t, uint64_t> reasons;
   std::map<std::string, uint64_t> blockedIn;
+  std::map<std::string, uint64_t> objects;  // W28
 };
 
 inline uint32_t TopWaker(const WaitGroup& g) {
@@ -214,18 +217,23 @@ inline Report BuildReport(const Analyzer& an, SymbolSource& sym, const ReportOpt
     return wx != wy ? wx > wy : x < y;
   });
 
-  // Idle threads (W21): they hardly ran, and every wait was a wait for work outside the
-  // program's code. They are counted, not reported; their waits say nothing about the program.
+  // Idle threads (W21): they hardly ran (at most 5% of their lifetime), none of their waits was
+  // in the program's code, and at least 90% of their wait time was a wait for work, so a new
+  // worker's short start-up wait does not count against it. They are counted, not reported.
   std::unordered_map<uint32_t, std::vector<const Bucket*>> byThread;
   for (const auto& [key, b] : an.buckets) byThread[b.tid].push_back(&b);
   auto isIdle = [&](uint32_t tid) {
     const uint64_t life = an.Lifetime(tid);
-    if (life == 0 || an.threads.at(tid).runTicks * 100 > life) return false;  // ran > 1%
+    if (life == 0 || an.threads.at(tid).runTicks * 20 > life) return false;
     auto it = byThread.find(tid);
     if (it == byThread.end()) return false;
-    for (const Bucket* b : it->second)
-      if (YourCodeFrame(*b, sym) != kNotYourCode || !IsWaitForWork(*b, sym)) return false;
-    return true;
+    uint64_t total = 0, forWork = 0;
+    for (const Bucket* b : it->second) {
+      if (YourCodeFrame(*b, sym) != kNotYourCode) return false;
+      total += b->ticks;
+      if (IsWaitForWork(*b, sym)) forWork += b->ticks;
+    }
+    return total > 0 && forWork * 10 >= total * 9;
   };
   std::vector<uint32_t> shown;
   for (uint32_t tid : tids) (isIdle(tid) ? r.idleThreads : shown).push_back(tid);
@@ -249,9 +257,14 @@ inline Report BuildReport(const Analyzer& an, SymbolSource& sym, const ReportOpt
   // Group the waits by activity (W22). The map keeps groups in a fixed order, and the sort keeps
   // ties in that order.
   std::map<std::tuple<uint32_t, int, std::string>, WaitGroup> groupMap;
+  // The object of a bucket's file I/O, once its name is known (W28).
+  auto objectKind = [&an](const Bucket& b) {
+    const Analyzer::FileName* f = an.FileOf(b.fileObject);
+    return f ? f->kind : ObjectKind::None;
+  };
   for (const auto& [key, b] : an.buckets) {
     if (idle(b.tid)) continue;
-    const Category c = Classify(b, sym);
+    const Category c = Classify(b, sym, objectKind(b));
     const std::string code = YourCodeFrame(b, sym);
     WaitGroup& g = groupMap[{b.tid, static_cast<int>(c), code}];
     g.tid = b.tid;
@@ -265,6 +278,8 @@ inline Report BuildReport(const Analyzer& an, SymbolSource& sym, const ReportOpt
     for (const auto& [waker, t] : b.wakers) g.wakers[waker] += t;
     g.reasons[b.reason] += b.ticks;
     g.blockedIn[BlockedInFrame(b, sym)] += b.ticks;
+    if (const Analyzer::FileName* f = an.FileOf(b.fileObject))
+      g.objects[DescribeObject(f->kind == ObjectKind::None ? ObjectKind::Device : f->kind, f->path)] += b.ticks;
   }
   std::vector<const WaitGroup*> groups;
   for (const auto& [key, g] : groupMap) groups.push_back(&g);
@@ -272,7 +287,8 @@ inline Report BuildReport(const Analyzer& an, SymbolSource& sym, const ReportOpt
   std::map<std::pair<uint32_t, uint64_t>, const WaitGroup*> groupOfBucket;
   for (const auto& [key, b] : an.buckets) {
     if (idle(b.tid)) continue;
-    groupOfBucket[key] = &groupMap.at({b.tid, static_cast<int>(Classify(b, sym)), YourCodeFrame(b, sym)});
+    groupOfBucket[key] =
+        &groupMap.at({b.tid, static_cast<int>(Classify(b, sym, objectKind(b))), YourCodeFrame(b, sym)});
   }
 
   // What thread `waker` did during the waits of `waiter` in `g` that it ended (W25).
@@ -358,6 +374,10 @@ inline Report BuildReport(const Analyzer& an, SymbolSource& sym, const ReportOpt
     std::stable_sort(w.blockedIn.begin(), w.blockedIn.end(),
                      [](const auto& x, const auto& y) { return x.second > y.second; });
     w.wokenBy = WakerLabel(an, TopWaker(*g), name);
+    for (const auto& [object, t] : g->objects)
+      w.objects.emplace_back(object, g->ticks ? 100.0 * static_cast<double>(t) / static_cast<double>(g->ticks) : 0.0);
+    std::stable_sort(w.objects.begin(), w.objects.end(),
+                     [](const auto& x, const auto& y) { return x.second > y.second; });
     w.reason = kReasonUnknown;
     uint64_t best = 0;
     for (const auto& [reason, t] : g->reasons)
@@ -526,6 +546,11 @@ inline std::string RenderText(const Report& r) {
             w.thread.c_str(), FormatDuration(w.seconds).c_str(), w.pct, w.count,
             w.stillWaitingAtEnd ? ", still waiting at the end" : "");
     Appendf(out, "      Waiting on : %s\n", CategoryLabel(w.category));
+    if (!w.objects.empty()) {
+      Appendf(out, "      Object     : %s", w.objects[0].first.c_str());
+      if (w.objects.size() > 1) Appendf(out, " (%.0f%%), and %zu more", w.objects[0].second, w.objects.size() - 1);
+      Appendf(out, "\n");
+    }
     if (w.p95Seconds >= 0)
       Appendf(out, "      Longest    : %s (95%% of the waits took at most %s)\n",
               FormatDuration(w.longestSeconds).c_str(), FormatDuration(w.p95Seconds).c_str());

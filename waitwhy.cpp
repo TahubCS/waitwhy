@@ -34,6 +34,7 @@
 #include <evntcons.h>
 #include <tlhelp32.h>
 #include <dbghelp.h>
+#include <tdh.h>
 // clang-format on
 
 #include <algorithm>
@@ -50,6 +51,7 @@
 #include <map>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -62,6 +64,7 @@
 #ifdef _MSC_VER
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "dbghelp.lib")
+#pragma comment(lib, "tdh.lib")
 #endif
 
 static_assert(sizeof(void*) == 8, "Build waitwhy as a 64-bit (x64) program.");
@@ -94,6 +97,8 @@ const GUID kStackWalkGuid = {
     0xdef2fe46, 0x7bd6, 0x4b80, {0xbd, 0x94, 0xf5, 0x7f, 0xe2, 0x0d, 0x0c, 0xe3}};
 const GUID kImageGuid = {
     0x2cb15d1d, 0x5fc1, 0x11d2, {0xab, 0xe1, 0x00, 0xa0, 0xc9, 0x11, 0xf5, 0x18}};
+const GUID kFileIoGuid = {
+    0x90cbdc39, 0x4a3e, 0x11d1, {0x84, 0xf4, 0x00, 0x00, 0xf8, 0x04, 0x64, 0xe3}};
 
 // Event types (opcodes) inside the kernel's Thread event class.
 constexpr UCHAR kOpThreadStart = 1;
@@ -104,6 +109,12 @@ constexpr UCHAR kOpReadyThread = 50;
 constexpr UCHAR kOpStackWalk = 32;     // inside the StackWalk class
 constexpr UCHAR kOpImageDcStart = 3;   // inside the Image class: loaded when the trace started
 constexpr UCHAR kOpImageLoad = 10;     // inside the Image class: loaded during the trace
+// Inside the FileIo class (W28): names of file objects, and the requests on them.
+constexpr UCHAR kOpFileName = 0;
+constexpr UCHAR kOpFileCreateName = 32;
+constexpr UCHAR kOpFileRundown = 36;
+constexpr UCHAR kOpFileCreate = 64;    // 64-75 and 77: a request starts (create, read, write, ...)
+constexpr UCHAR kOpFileOpEnd = 76;     // a request has finished
 
 constexpr int kTraceStackTracingInfo = 3;  // TRACE_INFO_CLASS value
 
@@ -150,6 +161,25 @@ std::string Narrow(const std::wstring& w) {
   WideCharToMultiByte(CP_UTF8, 0, w.c_str(), static_cast<int>(w.size()), &s[0], n, nullptr,
                       nullptr);
   return s;
+}
+
+// "\Device\HarddiskVolume3\x\y.dll" -> "C:\x\y.dll", "\SystemRoot\..." -> "C:\Windows\...".
+std::wstring DosPath(const std::wstring& path) {
+  if (path.rfind(L"\\??\\", 0) == 0) return path.substr(4);
+  if (path.rfind(L"\\SystemRoot\\", 0) == 0) {
+    wchar_t windows[MAX_PATH];
+    const UINT n = GetWindowsDirectoryW(windows, MAX_PATH);
+    if (n > 0 && n < MAX_PATH) return std::wstring(windows, n) + path.substr(11);
+  }
+  for (wchar_t drive = L'A'; drive <= L'Z'; ++drive) {
+    const wchar_t name[3] = {drive, L':', L'\0'};
+    wchar_t device[MAX_PATH];
+    if (!QueryDosDeviceW(name, device, MAX_PATH)) continue;
+    const std::wstring prefix = std::wstring(device) + L"\\";
+    if (path.size() > prefix.size() && _wcsnicmp(path.c_str(), prefix.c_str(), prefix.size()) == 0)
+      return std::wstring(name) + path.substr(prefix.size() - 1);
+  }
+  return path;
 }
 
 // ---------------------------------------------------------------------------
@@ -315,6 +345,149 @@ void OnImage(const EVENT_RECORD* ev) {
   g_images.push_back(std::move(image));
 }
 
+// Where the fields W28 needs sit in one kind of FileIo event, found once through TDH by their
+// names, because the layouts differ between event versions. -1: the event has no such field.
+struct FileIoLayout {
+  bool ok = false;
+  int irp = -1, fileObject = -1, ttid = -1, name = -1;
+  size_t ttidSize = 4;
+};
+
+FileIoLayout FindFileIoLayout(PEVENT_RECORD ev) {
+  // TDH_IN_TYPE values (tdh.h); not every SDK header names them.
+  enum : USHORT { kInUnicodeString = 1, kInInt8 = 3, kInUInt8 = 4, kInInt16 = 5, kInUInt16 = 6,
+                  kInInt32 = 7, kInUInt32 = 8, kInInt64 = 9, kInUInt64 = 10, kInBoolean = 13,
+                  kInPointer = 16, kInFiletime = 17, kInHexInt32 = 20, kInHexInt64 = 21 };
+  FileIoLayout layout;
+  ULONG size = 0;
+  if (TdhGetEventInformation(ev, 0, nullptr, nullptr, &size) != ERROR_INSUFFICIENT_BUFFER) return layout;
+  std::vector<unsigned char> buffer(size);
+  auto* info = reinterpret_cast<TRACE_EVENT_INFO*>(buffer.data());
+  if (TdhGetEventInformation(ev, 0, nullptr, info, &size) != ERROR_SUCCESS) return layout;
+  const size_t ptr = (ev->EventHeader.Flags & EVENT_HEADER_FLAG_64_BIT_HEADER) ? 8 : 4;
+  size_t offset = 0;
+  for (ULONG i = 0; i < info->TopLevelPropertyCount; ++i) {
+    const EVENT_PROPERTY_INFO& p = info->EventPropertyInfoArray[i];
+    if ((p.Flags & (PropertyStruct | PropertyParamLength | PropertyParamCount)) || p.count > 1) break;
+    const auto* name = reinterpret_cast<const wchar_t*>(buffer.data() + p.NameOffset);
+    size_t fieldSize = 0;
+    switch (p.nonStructType.InType) {
+      case kInInt8: case kInUInt8: fieldSize = 1; break;
+      case kInInt16: case kInUInt16: fieldSize = 2; break;
+      case kInInt32: case kInUInt32: case kInBoolean: case kInHexInt32: fieldSize = 4; break;
+      case kInInt64: case kInUInt64: case kInFiletime: case kInHexInt64: fieldSize = 8; break;
+      case kInPointer: fieldSize = ptr; break;
+      case kInUnicodeString: fieldSize = 0; break;  // runs to its terminating null
+      default: i = info->TopLevelPropertyCount; continue;  // anything else: stop here
+    }
+    const int at = static_cast<int>(offset);
+    if (wcscmp(name, L"IrpPtr") == 0) layout.irp = at;
+    else if (wcscmp(name, L"FileObject") == 0) layout.fileObject = at;
+    else if (wcscmp(name, L"TTID") == 0) layout.ttid = at, layout.ttidSize = fieldSize;
+    else if (p.nonStructType.InType == kInUnicodeString &&
+             (wcscmp(name, L"FileName") == 0 || wcscmp(name, L"OpenPath") == 0)) layout.name = at;
+    if (fieldSize == 0) break;  // nothing after a string has a fixed place
+    offset += fieldSize;
+  }
+  layout.ok = true;
+  return layout;
+}
+
+const FileIoLayout& FileIoLayoutOf(PEVENT_RECORD ev) {
+  static std::map<std::tuple<UCHAR, UCHAR, bool>, FileIoLayout> layouts;
+  const auto key = std::make_tuple(ev->EventHeader.EventDescriptor.Opcode,
+                                   ev->EventHeader.EventDescriptor.Version,
+                                   (ev->EventHeader.Flags & EVENT_HEADER_FLAG_64_BIT_HEADER) != 0);
+  auto it = layouts.find(key);
+  if (it == layouts.end()) it = layouts.emplace(key, FindFileIoLayout(ev)).first;
+  return it->second;
+}
+
+void DumpFileName(uint64_t fileObject, const Analyzer::FileName& f) {
+  if (!g_dump) return;
+  std::fprintf(g_dump, "FILENAME fileObject=0x%llx kind=%d name=%s\n",
+               static_cast<unsigned long long>(fileObject), static_cast<int>(f.kind), f.path.c_str());
+  ++g_dumpLines;
+}
+
+// File I/O of the program's threads, and the names of the file objects it used (W28).
+void OnFileIo(PEVENT_RECORD ev, UCHAR op) {
+  const FileIoLayout& layout = FileIoLayoutOf(ev);
+  if (!layout.ok) return;
+  const auto* p = static_cast<const uint8_t*>(ev->UserData);
+  const size_t length = ev->UserDataLength;
+  const size_t ptr = (ev->EventHeader.Flags & EVENT_HEADER_FLAG_64_BIT_HEADER) ? 8 : 4;
+  auto read = [&](int at, size_t bytes) -> uint64_t {
+    uint64_t v = 0;
+    if (at >= 0 && static_cast<size_t>(at) + bytes <= length) std::memcpy(&v, p + at, bytes);
+    return v;
+  };
+  auto readName = [&]() {
+    std::wstring name;
+    if (layout.name < 0) return name;
+    for (size_t at = static_cast<size_t>(layout.name); at + sizeof(wchar_t) <= length; at += sizeof(wchar_t)) {
+      wchar_t ch;
+      std::memcpy(&ch, p + at, sizeof ch);
+      if (ch == L'\0') break;
+      name += ch;
+    }
+    return name;
+  };
+  auto nameEvent = [&](uint64_t fileObject, const std::wstring& ntPath) {
+    FileIoEvent e;
+    e.op = FileIoEvent::Op::Name;
+    e.fileObject = fileObject;
+    e.kind = KindOfPath(Narrow(ntPath));
+    e.path = Narrow(DosPath(ntPath));
+    return e;
+  };
+  const auto ts = static_cast<uint64_t>(ev->EventHeader.TimeStamp.QuadPart);
+
+  if (op == kOpFileName || op == kOpFileCreateName || op == kOpFileRundown) {
+    const uint64_t fileObject = read(layout.fileObject, ptr);
+    const std::wstring ntPath = readName();
+    if (!fileObject || ntPath.empty()) return;
+    const FileIoEvent e = nameEvent(fileObject, ntPath);
+    if (g_analysis.OnFileIo(e)) DumpFileName(fileObject, *g_analysis.FileOf(fileObject));
+    return;
+  }
+  FileIoEvent e;
+  e.ts = ts;
+  e.irp = read(layout.irp, ptr);
+  if (!e.irp) return;
+  if (op == kOpFileOpEnd) {
+    e.op = FileIoEvent::Op::End;
+    if (g_analysis.OnFileIo(e) && g_dump) {
+      std::fprintf(g_dump, "FILEIO ts=%llu op=1 irp=0x%llx\n", static_cast<unsigned long long>(ts),
+                   static_cast<unsigned long long>(e.irp));
+      ++g_dumpLines;
+    }
+    return;
+  }
+  e.op = FileIoEvent::Op::Begin;
+  e.fileObject = read(layout.fileObject, ptr);
+  e.tid = layout.ttid >= 0 ? static_cast<uint32_t>(read(layout.ttid, layout.ttidSize))
+                           : static_cast<uint32_t>(ev->EventHeader.ThreadId);
+  if (!e.fileObject || PastWindow(ts)) return;
+  const bool knewName = g_analysis.FileOf(e.fileObject) && !g_analysis.FileOf(e.fileObject)->path.empty();
+  if (!g_analysis.OnFileIo(e)) return;
+  if (g_dump) {
+    std::fprintf(g_dump, "FILEIO ts=%llu op=0 tid=%u irp=0x%llx fileObject=0x%llx\n",
+                 static_cast<unsigned long long>(ts), e.tid, static_cast<unsigned long long>(e.irp),
+                 static_cast<unsigned long long>(e.fileObject));
+    ++g_dumpLines;
+  }
+  // A create names its file. A name seen before the program used the file (the rundown of
+  // files already open) is taken over now; the dump gets it here so a replay matches.
+  if (op == kOpFileCreate && layout.name >= 0) {
+    const std::wstring ntPath = readName();
+    if (!ntPath.empty() && g_analysis.OnFileIo(nameEvent(e.fileObject, ntPath)))
+      DumpFileName(e.fileObject, *g_analysis.FileOf(e.fileObject));
+  } else if (!knewName && g_analysis.FileOf(e.fileObject) && !g_analysis.FileOf(e.fileObject)->path.empty()) {
+    DumpFileName(e.fileObject, *g_analysis.FileOf(e.fileObject));
+  }
+}
+
 void WINAPI OnEvent(PEVENT_RECORD ev) {
   const EVENT_HEADER& h = ev->EventHeader;
   const UCHAR op = h.EventDescriptor.Opcode;
@@ -334,6 +507,8 @@ void WINAPI OnEvent(PEVENT_RECORD ev) {
     OnStackWalk(ev);
   } else if (IsEqualGUID(h.ProviderId, kImageGuid) && (op == kOpImageLoad || op == kOpImageDcStart)) {
     OnImage(ev);
+  } else if (IsEqualGUID(h.ProviderId, kFileIoGuid)) {
+    OnFileIo(ev, op);
   }
 }
 
@@ -351,7 +526,8 @@ void FillProps(SessionProps& sp, bool forStart) {
   sp.props.Wnode.Flags = WNODE_FLAG_TRACED_GUID;
   sp.props.EnableFlags =
       EVENT_TRACE_FLAG_CSWITCH | EVENT_TRACE_FLAG_DISPATCHER | EVENT_TRACE_FLAG_THREAD |
-      EVENT_TRACE_FLAG_IMAGE_LOAD;
+      EVENT_TRACE_FLAG_IMAGE_LOAD | EVENT_TRACE_FLAG_DISK_IO | EVENT_TRACE_FLAG_DISK_FILE_IO |
+      EVENT_TRACE_FLAG_FILE_IO | EVENT_TRACE_FLAG_FILE_IO_INIT;
   sp.props.LogFileMode = EVENT_TRACE_REAL_TIME_MODE;
   sp.props.BufferSize = 256;  // KB per buffer; context switches are very frequent
   sp.props.MinimumBuffers = 128;
@@ -511,25 +687,6 @@ void SnapshotThreadsStillBlocked() {
   }
   SymCleanup(proc);
   CloseHandle(proc);
-}
-
-// "\Device\HarddiskVolume3\x\y.dll" -> "C:\x\y.dll", "\SystemRoot\..." -> "C:\Windows\...".
-std::wstring DosPath(const std::wstring& path) {
-  if (path.rfind(L"\\??\\", 0) == 0) return path.substr(4);
-  if (path.rfind(L"\\SystemRoot\\", 0) == 0) {
-    wchar_t windows[MAX_PATH];
-    const UINT n = GetWindowsDirectoryW(windows, MAX_PATH);
-    if (n > 0 && n < MAX_PATH) return std::wstring(windows, n) + path.substr(11);
-  }
-  for (wchar_t drive = L'A'; drive <= L'Z'; ++drive) {
-    const wchar_t name[3] = {drive, L':', L'\0'};
-    wchar_t device[MAX_PATH];
-    if (!QueryDosDeviceW(name, device, MAX_PATH)) continue;
-    const std::wstring prefix = std::wstring(device) + L"\\";
-    if (path.size() > prefix.size() && _wcsnicmp(path.c_str(), prefix.c_str(), prefix.size()) == 0)
-      return std::wstring(name) + path.substr(prefix.size() - 1);
-  }
-  return path;
 }
 
 // --symbols: "ms" for Microsoft's public symbol server, or a DbgHelp symbol path (W27).

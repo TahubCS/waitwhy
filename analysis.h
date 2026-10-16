@@ -76,6 +76,46 @@ struct ThreadEvent {
   Kind kind = Kind::Created;
 };
 
+// What kind of object a file object is, from the kernel's name for it (W28).
+enum class ObjectKind : uint8_t {
+  None,         // no file I/O in flight
+  DiskFile,     // a file on a local volume
+  NetworkFile,  // a file on a network share
+  Console,      // the console window (ConDrv)
+  Pipe,         // a named or anonymous pipe
+  Socket,       // a network socket (AFD)
+  Device,       // any other device
+};
+
+// Classifies a kernel path such as \Device\HarddiskVolume3\x.txt or \Device\ConDrv\Output.
+inline ObjectKind KindOfPath(std::string path) {
+  for (char& ch : path) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+  auto starts = [&path](const char* prefix) { return path.rfind(prefix, 0) == 0; };
+  if (starts("\\device\\condrv")) return ObjectKind::Console;
+  if (starts("\\device\\namedpipe")) return ObjectKind::Pipe;
+  if (starts("\\device\\afd")) return ObjectKind::Socket;
+  if (starts("\\device\\mup") || starts("\\device\\lanmanredirector") ||
+      starts("\\device\\webdavredirector"))
+    return ObjectKind::NetworkFile;
+  if (starts("\\device\\harddisk") || starts("\\device\\cdrom") ||
+      (path.size() >= 3 && path[1] == ':' && path[2] == '\\'))
+    return ObjectKind::DiskFile;
+  return ObjectKind::Device;
+}
+
+// A file I/O request of one of the program's threads, its completion, or the name of a file
+// object (W28). The ETW decoding finds the thread, the request (IRP) and the file object.
+struct FileIoEvent {
+  enum class Op { Begin, End, Name };
+  Op op = Op::Begin;
+  uint64_t ts = 0;
+  uint32_t tid = kUnknownThread;  // Begin
+  uint64_t irp = 0;               // Begin, End
+  uint64_t fileObject = 0;        // Begin, Name
+  ObjectKind kind = ObjectKind::None;  // Name
+  std::string path;                    // Name: as the report shows it
+};
+
 // Who readied a thread (W3, W4). A DPC (a timer firing, an I/O finishing) borrows whatever
 // thread happens to be on the CPU; that thread did not wake ours, the system did. Otherwise
 // the event is logged by the readying thread, so its header names the waker; the thread last
@@ -97,6 +137,7 @@ struct OffCpu {
   int8_t reason = 0;       // kernel wait reason code
   bool isWait = false;     // true = blocked; false = preempted (it wanted the CPU)
   uint32_t wokenBy = kUnknownThread;
+  uint64_t fileObject = 0;  // file I/O the thread had in flight when it blocked (W28)
   std::vector<uint64_t> stack;  // user-mode return addresses, innermost first
 };
 
@@ -133,6 +174,8 @@ struct ThreadState {
   uint64_t bornAt = 0;
   uint64_t endedAt = 0;
   std::vector<Interval> intervals;  // in the order they were recorded, not sorted
+  std::map<uint64_t, uint64_t> ioInFlight;  // its file I/O requests: IRP -> file object (W28)
+  uint64_t lastIoFileObject = 0;            // the file object of the latest of them
 };
 
 // Wait durations on a log scale with four steps per doubling (W23), so a percentile is known to
@@ -187,13 +230,15 @@ struct Bucket {
   int8_t reason = 0;
   uint64_t ticks = 0;
   uint32_t count = 0;
+  uint64_t fileObject = 0;      // the file I/O in flight during these waits, if any (W28)
   DurationHistogram durations;  // each wait's own length (W23)
   bool stillWaitingAtEnd = false;
   std::vector<uint64_t> stack;
   std::map<uint32_t, uint64_t> wakers;  // waking thread id -> wait time it ended
 };
 
-inline uint64_t HashWait(int8_t reason, const std::vector<uint64_t>& stack) {
+inline uint64_t HashWait(int8_t reason, const std::vector<uint64_t>& stack,
+                         uint64_t fileObject = 0) {
   uint64_t h = 1469598103934665603ull;  // FNV-1a
   auto mix = [&h](uint64_t v) {
     for (int i = 0; i < 8; ++i) {
@@ -203,6 +248,7 @@ inline uint64_t HashWait(int8_t reason, const std::vector<uint64_t>& stack) {
   };
   mix(static_cast<uint8_t>(reason));
   for (uint64_t a : stack) mix(a);
+  if (fileObject) mix(fileObject);  // without one, the same key as before W28
   return h;
 }
 
@@ -235,6 +281,19 @@ class Analyzer {
   uint64_t unknownWakerTicks = 0;     // ... of which no waker was seen (W24)
   size_t intervalCount = 0;           // intervals kept, for all threads (W25)
   bool intervalsTruncated = false;    // kMaxIntervals was reached
+
+  // File objects the program's threads did I/O on, and their names once known (W28). Only
+  // these are named, so the map stays as small as the program's own files.
+  struct FileName {
+    ObjectKind kind = ObjectKind::None;
+    std::string path;
+  };
+  std::unordered_map<uint64_t, FileName> files;
+  std::unordered_map<uint64_t, uint32_t> irpThread;  // IRP in flight -> the thread that issued it
+  // Names of file objects the program has not used (yet), e.g. the rundown of files already
+  // open when tracing started: the console handle is opened before the trace. Bounded.
+  std::unordered_map<uint64_t, FileName> unclaimedNames;
+  static constexpr size_t kMaxUnclaimedNames = size_t{1} << 18;
 
   bool IsTarget(uint32_t tid) const { return targetThreads.count(tid) != 0; }
   bool IsProgramThread(uint32_t tid) const {
@@ -279,6 +338,7 @@ class Analyzer {
         st.open.start = ts;
         st.open.reason = e.oldWaitReason;
         st.open.isWait = (e.oldState == kThreadStateWaiting);
+        if (st.open.isWait && !st.ioInFlight.empty()) st.open.fileObject = st.lastIoFileObject;
         st.offCpu = true;
       }
     }
@@ -336,6 +396,49 @@ class Analyzer {
       st.bornAt = InWindow(e.ts);
       st.endedAt = 0;
     }
+  }
+
+  // Returns true when the event was about the program (a Name only for its own file objects).
+  bool OnFileIo(const FileIoEvent& e) {
+    if (e.op == FileIoEvent::Op::Name) {
+      auto it = files.find(e.fileObject);
+      if (it == files.end()) {
+        if (unclaimedNames.size() < kMaxUnclaimedNames || unclaimedNames.count(e.fileObject))
+          unclaimedNames[e.fileObject] = FileName{e.kind, e.path};
+        return false;
+      }
+      it->second.kind = e.kind;
+      it->second.path = e.path;
+      return true;
+    }
+    if (e.op == FileIoEvent::Op::Begin) {
+      if (!IsTarget(e.tid)) return false;
+      ThreadState& st = threads[e.tid];
+      st.ioInFlight[e.irp] = e.fileObject;
+      st.lastIoFileObject = e.fileObject;
+      irpThread[e.irp] = e.tid;
+      if (files.find(e.fileObject) == files.end()) {
+        auto named = unclaimedNames.find(e.fileObject);
+        if (named != unclaimedNames.end()) {
+          files.emplace(e.fileObject, std::move(named->second));
+          unclaimedNames.erase(named);
+        } else {
+          files.emplace(e.fileObject, FileName{});
+        }
+      }
+      return true;
+    }
+    auto it = irpThread.find(e.irp);
+    if (it == irpThread.end()) return false;
+    auto st = threads.find(it->second);
+    if (st != threads.end()) st->second.ioInFlight.erase(e.irp);
+    irpThread.erase(it);
+    return true;
+  }
+
+  const FileName* FileOf(uint64_t fileObject) const {
+    auto it = files.find(fileObject);
+    return fileObject && it != files.end() ? &it->second : nullptr;
   }
 
   void OnStack(const StackEvent& e) {
@@ -422,7 +525,7 @@ class Analyzer {
     const uint64_t d = waitEnd > w.start ? waitEnd - w.start : 0;
     st.readyTicks += w.end > waitEnd ? w.end - waitEnd : 0;
     st.waitTicks += d;
-    const uint64_t hash = HashWait(w.reason, w.stack);
+    const uint64_t hash = HashWait(w.reason, w.stack, w.fileObject);
     Keep(st, Interval::Waiting, w.start, waitEnd, hash, w.wokenBy);
     Keep(st, Interval::Ready, waitEnd, w.end);
     Bucket& b = buckets[{tid, hash}];
@@ -430,6 +533,7 @@ class Analyzer {
       b.tid = tid;
       b.reason = w.reason;
       b.stack = w.stack;
+      b.fileObject = w.fileObject;
     }
     b.ticks += d;
     b.count += 1;
@@ -492,6 +596,8 @@ class Analyzer {
     st.endedAt = ts;
     for (auto& entry : st.awaitingStack) RecordWithoutStack(e.tid, st, entry.second);
     st.awaitingStack.clear();
+    for (const auto& [irp, fileObject] : st.ioInFlight) irpThread.erase(irp);
+    st.ioInFlight.clear();
     st.offCpu = false;
     st.seen = true;
     targetThreads.erase(e.tid);
@@ -584,7 +690,7 @@ inline bool HasAny(const std::string& text, std::initializer_list<const char*> w
   return false;
 }
 
-inline Category Classify(const Bucket& b, SymbolSource& sym) {
+inline Category ClassifyByNames(const Bucket& b, SymbolSource& sym) {
   std::string all;
   for (uint64_t a : b.stack) all += Lower(sym.Name(a)) + "\n";
   if (HasAny(all, {"!readfile", "!writefile", "!flushfilebuffers", "!ntreadfile",
@@ -613,6 +719,34 @@ inline Category Classify(const Bucket& b, SymbolSource& sym) {
   if (b.reason == 2 || b.reason == 9) return Category::PageFault;
   if (b.reason == 6 || b.reason == 13) return Category::OtherThread;
   return Category::Other;
+}
+
+// The object a wait was on refines what the function names say about I/O (W28): a WriteFile to
+// the console is not the disk. Only waits the names call disk, network or something else are
+// changed; a lock, sleep or wait for another thread stays what the names say.
+inline Category Classify(const Bucket& b, SymbolSource& sym, ObjectKind object = ObjectKind::None) {
+  const Category byName = ClassifyByNames(b, sym);
+  if (byName != Category::Disk && byName != Category::Network && byName != Category::Other)
+    return byName;
+  switch (object) {
+    case ObjectKind::DiskFile: return Category::Disk;
+    case ObjectKind::NetworkFile:
+    case ObjectKind::Socket: return Category::Network;
+    case ObjectKind::Console:
+    case ObjectKind::Pipe: return Category::OtherThread;  // the program at the other end
+    default: return byName;
+  }
+}
+
+// How the report names the object a wait was on.
+inline std::string DescribeObject(ObjectKind kind, const std::string& path) {
+  switch (kind) {
+    case ObjectKind::Console: return "the console window";
+    case ObjectKind::Pipe: return "a pipe" + (path.empty() ? std::string() : " (" + path + ")");
+    case ObjectKind::Socket: return "a network socket";
+    case ObjectKind::None: return std::string();
+    default: return path.empty() ? "a file (name not recorded)" : path;
+  }
 }
 
 // True for C++ runtime and standard library code that the linker copied into the exe
