@@ -1,0 +1,65 @@
+
+==============================================================
+ waitwhy report: slowapp.exe (PID 7), watched for 10.00 s
+==============================================================
+
+Where each thread's time went
+  Thread                            Running    Waiting   Wanted CPU
+  Thread 4                               0%       100%           0%
+  Thread 3 (ticker)                      0%       100%           0%
+  Thread 2 (saver)                       0%       100%           0%
+  Thread 1 (main)                        0%       100%           0%
+
+Biggest waits
+
+  #1  Thread 4  waited 10.00 s (100% of the time) over 1 wait(s), still waiting at the end
+      Waiting on : something else
+      Your code  : (not in your program's code)
+      Blocked in : ntdll!TpCallbackMayRunLong
+      Woken by   : unknown
+      Wait reason: not known (already blocked when the trace started)
+
+  #2  Thread 3 (ticker)  waited 10.00 s (100% of the time) over 2 wait(s), still waiting at the end
+      Waiting on : an intentional sleep or timer
+      Your code  : slowapp!`anonymous namespace'::ticker_thread
+      Blocked in : KERNELBASE!SleepEx
+      Woken by   : the system (a timer or finished I/O)
+      Wait reason: DelayExecution (kernel code 4)
+
+  #3  Thread 2 (saver)  waited 6.99 s (70% of the time) over 1 wait(s), still waiting at the end
+      Waiting on : an intentional sleep or timer
+      Your code  : slowapp!`anonymous namespace'::saver_thread
+      Blocked in : KERNELBASE!SleepEx
+      Woken by   : unknown
+      Wait reason: DelayExecution (kernel code 4)
+
+  #4  Thread 1 (main)  waited 6.98 s (70% of the time) over 1 wait(s), still waiting at the end
+      Waiting on : an intentional sleep or timer
+      Your code  : slowapp!main
+      Blocked in : KERNELBASE!SleepEx
+      Woken by   : unknown
+      Wait reason: DelayExecution (kernel code 4)
+
+  #5  Thread 1 (main)  waited 3.01 s (30% of the time) over 1 wait(s)
+      Waiting on : a lock held by another thread
+      Your code  : slowapp!`anonymous namespace'::update_frame
+      Blocked in : ntdll!RtlSleepConditionVariableSRW
+      Woken by   : Thread 2 (saver)
+      Wait reason: WrAlertByThreadId (kernel code 37)
+
+  #6  Thread 2 (saver)  waited 3.00 s (30% of the time) over 1 wait(s)
+      Waiting on : the disk (file read/write/flush)
+      Your code  : slowapp!`anonymous namespace'::write_settings_to_disk
+      Blocked in : KERNELBASE!WriteFile
+      Woken by   : the system (a timer or finished I/O)
+      Wait reason: Executive (kernel code 0)
+
+What this means
+  * Thread 4 spent 100% of the time waiting, in (not in your program's code).
+  * Thread 2 (saver) spent 30% of the time waiting for the disk, in slowapp!`anonymous namespace'::write_settings_to_disk.
+  * Thread 1 (main) spent 30% of the time waiting for a lock that another thread was holding, in slowapp!`anonymous namespace'::update_frame.
+    The lock was released by Thread 2 (saver), which spends its time waiting for the disk, in slowapp!`anonymous namespace'::write_settings_to_disk.
+    It is most likely holding the lock during that slow work. Move the
+    slow work outside the lock (copy the data first, then do the work).
+
+(12345 context switches seen, 3 waits with a call stack, 0 waits without a call stack, 1 kernel-only stack parts)

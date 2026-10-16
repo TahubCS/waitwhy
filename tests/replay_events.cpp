@@ -55,7 +55,7 @@ void CheckWholeTrace(const std::vector<DumpLine>& all) {
   Analyzer an;
   DumpReplay replay(an);
   const DumpInfo info = replay.Run(all);
-  ExpectEq("read as version 1", info.version, 1);
+  ExpectEq("read as version 1", static_cast<unsigned long long>(info.version), 1);
   ExpectEq("context switches", an.contextSwitches, 3891);
   ExpectEq("waits with a stack", an.waitsWithStack, 1552);
   ExpectEq("waits without a stack", an.waitsWithoutStack, 4);
@@ -101,7 +101,7 @@ void CheckVersion2() {
   Analyzer an;
   DumpReplay replay(an);
   const DumpInfo info = replay.Run(lines);
-  ExpectEq("version", info.version, 2);
+  ExpectEq("version", static_cast<unsigned long long>(info.version), 2);
   ExpectEq("pid", an.pid, 42);
   ExpectEq("ticks per second", static_cast<unsigned long long>(info.ticksPerSecond), 1000);
   ExpectStr("program file", info.exeFile, "slowapp.exe");

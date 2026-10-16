@@ -30,12 +30,16 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "tests\decode_tests.cpp did not compile" }
           cl /nologo /W4 /WX /EHsc /O2 /std:c++17 tests\analysis_tests.cpp /Fe:analysis_tests.exe
           if ($LASTEXITCODE -ne 0) { throw "tests\analysis_tests.cpp did not compile" }
+          cl /nologo /W4 /WX /EHsc /O2 /std:c++17 tests\golden_tests.cpp /Fe:golden_tests.exe
+          if ($LASTEXITCODE -ne 0) { throw "tests\golden_tests.cpp did not compile" }
 
       - name: Unit tests
         shell: pwsh
         run: |
           .\analysis_tests.exe
           if ($LASTEXITCODE -ne 0) { throw "tests\analysis_tests.cpp failed" }
+          .\golden_tests.exe tests\golden
+          if ($LASTEXITCODE -ne 0) { throw "tests\golden_tests.cpp failed" }
 
       # Replays a recorded trace through the analysis core, and through waitwhy's ETW decoding;
       # needs no kernel trace.
@@ -90,6 +94,22 @@ jobs:
           if ($fixed -match 'waiting for a lock that another thread was holding') {
             $failures += 'Fixed run: a thread is still reported as blocked on a lock.'
           }
+
+          # W19: the report rebuilt from each run's dump must equal the live report.
+          function Get-ReportPart([string]$Text) {
+            $i = $Text.IndexOf('=====')
+            if ($i -lt 0) { return '' }
+            return ($Text.Substring($i) -replace "`r", '').TrimEnd()
+          }
+          foreach ($run in @(@{ Label = 'buggy'; Live = $buggy }, @{ Label = 'fixed'; Live = $fixed })) {
+            $offline = & .\waitwhy.exe --from-dump "$($run.Label)-events.txt" 2>&1 | Out-String
+            if ($LASTEXITCODE -ne 0 -or (Get-ReportPart $offline) -ne (Get-ReportPart $run.Live)) {
+              Write-Host "===== report rebuilt from $($run.Label)-events.txt ====="
+              Write-Host $offline
+              $failures += "$($run.Label) run: the report rebuilt from the dump differs from the live report."
+            }
+          }
+
           foreach ($f in $failures) { Write-Host "::error::$f" }
           if ($failures.Count -gt 0) { exit 1 }
           Write-Host 'C8 holds: the bug is reported in the buggy run and not in the fixed run.'
@@ -121,6 +141,8 @@ jobs:
             echo "::group::$cxx"
             $cxx -std=c++17 -O2 -Wall -Wextra -Wshadow -Werror tests/analysis_tests.cpp -o analysis_tests
             ./analysis_tests
+            $cxx -std=c++17 -O2 -Wall -Wextra -Wshadow -Werror tests/golden_tests.cpp -o golden_tests
+            ./golden_tests tests/golden
             $cxx -std=c++17 -O2 -Wall -Wextra -Wshadow -Werror tests/replay_events.cpp -o replay_events
             ./replay_events docs/traces/buggy-64mb-events.txt
             echo "::endgroup::"

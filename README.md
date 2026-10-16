@@ -56,7 +56,25 @@ To see the raw kernel events behind a report, add `--dump-events FILE`. It write
 .\waitwhy.exe --name slowapp.exe --seconds 5 --dump-events dump.txt
 ```
 
+To print the report again later, on any machine and without Administrator rights, give waitwhy the dump:
+
+```powershell
+.\waitwhy.exe --from-dump dump.txt
+```
+
 Function names only show up for programs that have `.pdb` symbol files next to them (your own debug or `/Zi` builds). For other programs you will see Windows function names (for example `KERNELBASE!ReadFile`) and addresses.
+
+## Report lines scripts can rely on
+
+CI and scripts may match these lines of the text report. They stay as they are until a
+machine-readable report exists (W34); `tests/golden/` holds a complete expected report.
+
+| Line | Example |
+|---|---|
+| Report header | ` waitwhy report: slowapp.exe (PID 1234), watched for 8.00 s` |
+| A finding | `  * Thread 4632 (main) spent 83% of the time waiting for a lock that another thread was holding, in slowapp!update_frame.` |
+| Who released a lock | `    The lock was released by Thread 8056 (saver), which spends its time waiting for the disk, in slowapp!write_settings_to_disk.` |
+| No finding | `  No thread lost a significant share of its time to blocking (sleeps excluded).` |
 
 ## Exit codes
 

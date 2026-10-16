@@ -1,0 +1,61 @@
+# Hand-written version 2 dump (W18) for the golden report test (W19). Ticks are milliseconds.
+# Buggy slowapp in miniature: saver (2) writes to disk for 3 s while holding the lock that
+# main (1) waits for in update_frame; ticker (3) sleeps; thread 4 is an idle thread-pool
+# worker that never runs. Tracing runs from 1000 to 11000, 10 s.
+DUMP version=2 pid=7 ticksPerSecond=1000
+TARGET tid=1
+TARGET tid=2
+TARGET tid=3
+TARGET tid=4
+WINDOW ts=1000
+CSWITCH ts=1000 cpu=0 old=2 new=0 oldState=5 oldReason=0
+CSWITCH ts=1001 cpu=1 old=1 new=0 oldState=5 oldReason=37
+CSWITCH ts=1002 cpu=2 old=3 new=0 oldState=5 oldReason=4
+READY ts=4000 cpu=0 readied=2 headerThread=0 flag=0x01 by=0
+CSWITCH ts=4000 cpu=0 old=0 new=2 oldState=2 oldReason=0
+STACK ts=4000 eventTs=4000 tid=2 kernelFrames=5 userFrames=0 firstUser=0x0
+STACK ts=4001 eventTs=4000 tid=2 kernelFrames=0 userFrames=5 firstUser=0x7ff600002000 frames=0x7ff600002000,0x7ff600002010,0x7ff600002020,0x7ff600002030,0x7ff600002040
+READY ts=4010 cpu=0 readied=1 headerThread=2 flag=0x00 by=2
+CSWITCH ts=4010 cpu=0 old=2 new=1 oldState=5 oldReason=4
+STACK ts=4011 eventTs=4010 tid=1 kernelFrames=0 userFrames=7 firstUser=0x7ff600001000 frames=0x7ff600001000,0x7ff600001010,0x7ff600001020,0x7ff600001030,0x7ff600001040,0x7ff600001050,0x7ff600001060
+CSWITCH ts=4020 cpu=0 old=1 new=0 oldState=5 oldReason=4
+READY ts=6002 cpu=2 readied=3 headerThread=0 flag=0x01 by=0
+CSWITCH ts=6002 cpu=2 old=0 new=3 oldState=2 oldReason=0
+STACK ts=6003 eventTs=6002 tid=3 kernelFrames=0 userFrames=3 firstUser=0x7ff600003000 frames=0x7ff600003000,0x7ff600003010,0x7ff600003020
+CSWITCH ts=6003 cpu=2 old=3 new=0 oldState=5 oldReason=4
+END ts=11000 contextSwitches=12345 stacksOn=1 eventsLost=0 buffersLost=0
+SNAPSHOT tid=1 frames=0x7ff600004000,0x7ff600004010,0x7ff600004020
+SNAPSHOT tid=2 frames=0x7ff600004000,0x7ff600004010,0x7ff600005020
+SNAPSHOT tid=3 frames=0x7ff600003000,0x7ff600003010,0x7ff600003020
+SNAPSHOT tid=4 frames=0x7ff600006000,0x7ff600006010,0x7ff600006020,0x7ff600006030
+NAMES symbolsOk=1
+EXE name=slowapp.exe
+SYMBOL addr=0x7ff600001000 name=ntdll!NtWaitForAlertByThreadId
+SYMBOL addr=0x7ff600001010 name=ntdll!RtlSleepConditionVariableSRW
+SYMBOL addr=0x7ff600001020 name=slowapp!mtx_do_lock
+SYMBOL addr=0x7ff600001030 name=slowapp!_Mtx_lock
+SYMBOL addr=0x7ff600001040 name=slowapp!std::mutex::lock
+SYMBOL addr=0x7ff600001050 name=slowapp!`anonymous namespace'::update_frame
+SOURCE addr=0x7ff600001050 file=c:\src\waitwhy\slowapp.cpp
+SYMBOL addr=0x7ff600001060 name=slowapp!main
+SOURCE addr=0x7ff600001060 file=c:\src\waitwhy\slowapp.cpp
+SYMBOL addr=0x7ff600002000 name=ntdll!NtWriteFile
+SYMBOL addr=0x7ff600002010 name=KERNELBASE!WriteFile
+SYMBOL addr=0x7ff600002020 name=slowapp!`anonymous namespace'::write_settings_to_disk
+SYMBOL addr=0x7ff600002030 name=slowapp!`anonymous namespace'::save_settings
+SYMBOL addr=0x7ff600002040 name=slowapp!`anonymous namespace'::saver_thread
+SYMBOL addr=0x7ff600003000 name=ntdll!NtDelayExecution
+SYMBOL addr=0x7ff600003010 name=KERNELBASE!SleepEx
+SYMBOL addr=0x7ff600003020 name=slowapp!`anonymous namespace'::ticker_thread
+SYMBOL addr=0x7ff600004000 name=ntdll!NtDelayExecution
+SYMBOL addr=0x7ff600004010 name=KERNELBASE!SleepEx
+SYMBOL addr=0x7ff600004020 name=slowapp!main
+SYMBOL addr=0x7ff600005020 name=slowapp!`anonymous namespace'::saver_thread
+SYMBOL addr=0x7ff600006000 name=ntdll!NtWaitForWorkViaWorkerFactory
+SYMBOL addr=0x7ff600006010 name=ntdll!TpCallbackMayRunLong
+SYMBOL addr=0x7ff600006020 name=kernel32!BaseThreadInitThunk
+SYMBOL addr=0x7ff600006030 name=ntdll!RtlUserThreadStart
+THREADNAME tid=1 name=Thread 1 (main)
+THREADNAME tid=2 name=Thread 2 (saver)
+THREADNAME tid=3 name=Thread 3 (ticker)
+THREADNAME tid=4 name=Thread 4

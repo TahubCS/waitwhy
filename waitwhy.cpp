@@ -45,6 +45,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <cwchar>
+#include <filesystem>
+#include <fstream>
 #include <map>
 #include <string>
 #include <thread>
@@ -55,6 +57,7 @@
 
 #include "analysis.h"
 #include "dump.h"
+#include "report.h"
 
 #ifdef _MSC_VER
 #pragma comment(lib, "advapi32.lib")
@@ -542,17 +545,11 @@ class Symbolizer : public SymbolSource {
 // Turning stacks into plain English (the rules live in analysis.h)
 // ---------------------------------------------------------------------------
 
-std::string WakerLabel(uint32_t tid) {
-  if (tid == kUnknownThread) return "unknown";
-  if (g_analysis.IsProgramThread(tid)) return ThreadLabel(tid);
-  if (tid == kSystemWaker) return "the system (a timer or finished I/O)";
-  return "outside your program (thread " + std::to_string(tid) + ")";
-}
-
 // Ends a dump with every name the report uses (W18), so the report can be rebuilt from the
 // dump alone: the program's file, each address in a wait's stack, and the thread labels.
-void WriteDumpNames(FILE* out, Symbolizer& sym) {
+void WriteDumpNames(FILE* out, Symbolizer& sym, bool symbolsOk) {
   const Analyzer& an = g_analysis;
+  std::fprintf(out, "NAMES symbolsOk=%d\n", symbolsOk ? 1 : 0);
   if (!sym.ExeFile().empty()) std::fprintf(out, "EXE name=%s\n", sym.ExeFile().c_str());
   std::map<uint64_t, bool> addrs;  // sorted, so dumps of the same run compare equal
   for (const auto& [key, b] : an.buckets)
@@ -582,131 +579,61 @@ void WriteDumpNames(FILE* out, Symbolizer& sym) {
 
 void PrintReport(double ticksPerSecond, int topN, const SessionProps& stopped, bool stacksOn,
                  Symbolizer& sym, bool symbolsOk) {
-  const Analyzer& an = g_analysis;
-  const double window =
-      an.lastTs > an.firstTs ? static_cast<double>(an.lastTs - an.firstTs) / ticksPerSecond : 0.0;
-  auto secs = [&](uint64_t ticks) { return static_cast<double>(ticks) / ticksPerSecond; };
-  auto pct = [&](uint64_t ticks) { return window > 0 ? 100.0 * secs(ticks) / window : 0.0; };
+  ReportOptions opt;
+  opt.ticksPerSecond = ticksPerSecond;
+  opt.topN = static_cast<size_t>(topN);
+  opt.eventsLost = stopped.props.EventsLost;
+  opt.buffersLost = stopped.props.RealTimeBuffersLost;
+  opt.stacksOn = stacksOn;
+  opt.symbolsOk = symbolsOk;
+  opt.exeFile = sym.ExeFile();
+  const Report report = BuildReport(g_analysis, sym, opt, ThreadLabel);
+  std::fputs(RenderText(report).c_str(), stdout);
+}
 
-  std::printf("\n==============================================================\n");
-  std::printf(" waitwhy report: %s (PID %u), watched for %s\n",
-              sym.ExeFile().empty() ? "process" : sym.ExeFile().c_str(), an.pid,
-              FormatDuration(window).c_str());
-  std::printf("==============================================================\n");
-  if (stopped.props.EventsLost || stopped.props.RealTimeBuffersLost)
-    std::printf("Warning: Windows dropped %lu events (%lu buffers). Numbers may be a bit low.\n",
-                stopped.props.EventsLost, stopped.props.RealTimeBuffersLost);
-  if (!stacksOn) std::printf("Warning: call stacks were not available, so code locations are missing.\n");
-  if (!symbolsOk) std::printf("Warning: could not open the process to read function names (did it exit?).\n");
-
-  // Per-thread summary.
-  std::vector<uint32_t> tids;  // includes threads that exited during the trace
-  for (const auto& [tid, st] : an.threads)
-    if (st.seen) tids.push_back(tid);
-  int unseen = 0;
-  for (uint32_t tid : an.targetThreads) {
-    auto it = an.threads.find(tid);
-    if (it == an.threads.end() || !it->second.seen) ++unseen;
+// Rebuilds the report from a version 2 dump (W18, W19), with no kernel trace and without the
+// program: everything it needs, including the names, is in the dump.
+int ReportFromDump(const std::wstring& path, int topN) {
+  std::ifstream in(std::filesystem::path(path), std::ios::binary);
+  const std::vector<DumpLine> lines = ReadDump(in);
+  if (lines.empty()) {
+    std::printf("Cannot read an event dump from %s.\n", Narrow(path).c_str());
+    return kExitUsage;
   }
-  std::sort(tids.begin(), tids.end(), [&an](uint32_t x, uint32_t y) {
-    return an.threads.at(x).waitTicks > an.threads.at(y).waitTicks;
-  });
-
-  std::printf("\nWhere each thread's time went\n");
-  std::printf("  %-30s %10s %10s %12s\n", "Thread", "Running", "Waiting", "Wanted CPU");
-  for (uint32_t tid : tids) {
-    const ThreadState& st = an.threads.at(tid);
-    std::printf("  %-30.30s %9.0f%% %9.0f%% %11.0f%%\n", ThreadLabel(tid).c_str(),
-                pct(st.runTicks), pct(st.waitTicks), pct(st.readyTicks));
-  }
-  if (unseen)
-    std::printf("  (%d more thread(s) never ran during the window: blocked the whole time or idle)\n",
-                unseen);
-
-  // Biggest waits.
-  std::vector<const Bucket*> buckets;
-  for (auto& [key, b] : an.buckets) buckets.push_back(&b);
-  std::sort(buckets.begin(), buckets.end(),
-            [](const Bucket* a, const Bucket* b) { return a->ticks > b->ticks; });
-
-  std::printf("\nBiggest waits\n");
-  if (buckets.empty()) std::printf("  No waits recorded. Is the program doing anything?\n");
-  std::unordered_map<const Bucket*, Category> category;
-  for (const Bucket* b : buckets) category[b] = Classify(*b, sym);
-  for (size_t i = 0; i < buckets.size() && i < static_cast<size_t>(topN); ++i) {
-    const Bucket& b = *buckets[i];
-    std::printf("\n  #%zu  %s  waited %s (%.0f%% of the time) over %u wait(s)%s\n", i + 1,
-                ThreadLabel(b.tid).c_str(), FormatDuration(secs(b.ticks)).c_str(), pct(b.ticks),
-                b.count, b.stillWaitingAtEnd ? ", still waiting at the end" : "");
-    std::printf("      Waiting on : %s\n", CategoryLabel(category[&b]));
-    std::printf("      Your code  : %s\n", YourCodeFrame(b, sym).c_str());
-    std::printf("      Blocked in : %s\n", BlockedInFrame(b, sym).c_str());
-    std::printf("      Woken by   : %s\n", WakerLabel(TopWaker(b)).c_str());
-    if (b.reason == kReasonUnknown)
-      std::printf("      Wait reason: not known (already blocked when the trace started)\n");
-    else
-      std::printf("      Wait reason: %s (kernel code %d)\n", WaitReasonName(b.reason), b.reason);
-  }
-
-  // Plain-English findings.
-  std::printf("\nWhat this means\n");
-  bool anyFinding = false;
-  for (uint32_t tid : tids) {
-    std::vector<const Bucket*> mine;
-    for (const Bucket* b : buckets)
-      if (b->tid == tid) mine.push_back(b);
-    bool printedForThread = false;
-    for (const Bucket* b : mine) {
-      Category c = category[b];
-      if (c == Category::Sleep || pct(b->ticks) < 10.0) continue;
-      anyFinding = printedForThread = true;
-      std::printf("  * %s spent %.0f%% of the time %s, in %s.\n", ThreadLabel(tid).c_str(),
-                  pct(b->ticks), CategorySentence(c), YourCodeFrame(*b, sym).c_str());
-      uint32_t waker = TopWaker(*b);
-      if (c == Category::Lock && g_analysis.IsProgramThread(waker) && waker != tid) {
-        // What was the thread that released the lock busy with?
-        for (const Bucket* wb : buckets) {
-          if (wb->tid != waker) continue;
-          Category wc = category[wb];
-          if (wc == Category::Lock || wc == Category::Sleep) continue;
-          if (wb->stack.empty()) continue;  // nothing to say about where its time went
-          std::printf("    The lock was released by %s, which spends its time %s, in %s.\n",
-                      ThreadLabel(waker).c_str(), CategorySentence(wc),
-                      YourCodeFrame(*wb, sym).c_str());
-          std::printf("    It is most likely holding the lock during that slow work. Move the\n"
-                      "    slow work outside the lock (copy the data first, then do the work).\n");
-          break;
-        }
-      }
-    }
-    const ThreadState& st = an.threads.at(tid);
-    if (pct(st.readyTicks) >= 20.0) {
-      anyFinding = printedForThread = true;
-      std::printf("  * %s spent %.0f%% of the time ready to run but waiting for a free CPU.\n"
-                  "    The machine is busy; this is CPU competition, not a blocking problem.\n",
-                  ThreadLabel(tid).c_str(), pct(st.readyTicks));
-    }
-    (void)printedForThread;
-  }
-  if (!anyFinding)
-    std::printf("  No thread lost a significant share of its time to blocking (sleeps excluded).\n");
-
-  std::printf("\n(%llu context switches seen, %llu waits with a call stack,"
-              " %llu waits without a call stack, %llu kernel-only stack parts)\n",
-              static_cast<unsigned long long>(an.contextSwitches),
-              static_cast<unsigned long long>(an.waitsWithStack),
-              static_cast<unsigned long long>(an.waitsWithoutStack),
-              static_cast<unsigned long long>(an.kernelOnlyFragments));
+  Analyzer an;
+  DumpReplay replay(an);
+  const DumpInfo info = replay.Run(lines);
+  if (info.version < 2)
+    std::printf("Note: %s is a version 1 dump, which holds no function or thread names.\n",
+                Narrow(path).c_str());
+  DumpSymbols sym(lines);
+  ReportOptions opt;
+  opt.ticksPerSecond = info.ticksPerSecond > 0 ? info.ticksPerSecond : 1e7;
+  opt.topN = static_cast<size_t>(topN);
+  opt.eventsLost = info.eventsLost;
+  opt.buffersLost = info.buffersLost;
+  opt.stacksOn = info.stacksOn;
+  opt.symbolsOk = info.symbolsOk;
+  opt.exeFile = info.exeFile;
+  auto name = [&info](uint32_t tid) {
+    auto it = info.threadNames.find(tid);
+    return it != info.threadNames.end() ? it->second : "Thread " + std::to_string(tid);
+  };
+  std::printf("Report rebuilt from %s.\n", Narrow(path).c_str());
+  std::fputs(RenderText(BuildReport(an, sym, opt, name)).c_str(), stdout);
+  return kExitOk;
 }
 
 void Usage() {
   std::printf(
       "usage: waitwhy (--pid N | --name program.exe) [--seconds N] [--top N]\n"
       "               [--dump-events FILE]\n"
+      "       waitwhy --from-dump FILE [--top N]\n"
       "  Watches a running program and reports what its threads were waiting on.\n"
-      "  --dump-events also writes every context-switch, ready-thread and stack event\n"
-      "  of the program's threads to FILE, one line each, in the order they arrived.\n"
-      "  Must be run as Administrator.\n"
+      "  --dump-events also writes every context-switch, ready-thread, thread and stack\n"
+      "  event of the program's threads to FILE, one line each, in the order they\n"
+      "  arrived, then the names the report uses. Must be run as Administrator.\n"
+      "  --from-dump prints the report again from such a FILE, on any machine.\n"
       "  Exit codes: 0 report printed, 1 bad arguments or program not found,\n"
       "  2 the kernel trace could not be started (not Administrator, or unavailable).\n");
 }
@@ -721,6 +648,7 @@ int wmain(int argc, wchar_t** argv) {
   uint32_t& pid = g_analysis.pid;
   std::wstring name;
   std::wstring dumpPath;
+  std::wstring fromDump;
   int seconds = 10;
   int topN = 6;
   for (int i = 1; i < argc; ++i) {
@@ -736,10 +664,19 @@ int wmain(int argc, wchar_t** argv) {
       topN = (std::max)(1, _wtoi(argv[++i]));
     } else if (a == L"--dump-events" && hasValue) {
       dumpPath = argv[++i];
+    } else if (a == L"--from-dump" && hasValue) {
+      fromDump = argv[++i];
     } else {
       Usage();
       return kExitUsage;
     }
+  }
+  if (!fromDump.empty()) {
+    if (pid != 0 || !name.empty() || !dumpPath.empty()) {
+      Usage();
+      return kExitUsage;
+    }
+    return ReportFromDump(fromDump, topN);
   }
   if (!name.empty() && !FindProcessByName(name, &pid)) {
     std::printf("No running process named %s.\n", Narrow(name).c_str());
@@ -836,7 +773,7 @@ int wmain(int argc, wchar_t** argv) {
   Symbolizer sym;
   const bool symbolsOk = sym.Init(pid);
   if (g_dump) {
-    WriteDumpNames(g_dump, sym);
+    WriteDumpNames(g_dump, sym, symbolsOk);
     std::fclose(g_dump);
     g_dump = nullptr;
     std::printf("Wrote %llu events to %s.\n", static_cast<unsigned long long>(g_dumpLines),

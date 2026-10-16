@@ -17,6 +17,7 @@
 //   THREAD     ts kind pid tid                     kind: 0 created, 1 existing, 2 ended
 //   END        ts contextSwitches stacksOn eventsLost buffersLost   tracing stopped
 //   SNAPSHOT   tid frames=0x..,0x..                stack of a thread still blocked (W7)
+//   NAMES      symbolsOk                           the program could be opened for names
 //   EXE        name=<file name of the program>
 //   SYMBOL     addr name=<module!function>         every address in the report's stacks
 //   SOURCE     addr file=<source file, lower case>
@@ -90,9 +91,8 @@ inline DumpLine ParseDumpLine(const std::string& line, int number) {
   return l;
 }
 
-inline std::vector<DumpLine> ReadDump(const char* path) {
+inline std::vector<DumpLine> ReadDump(std::istream& in) {
   std::vector<DumpLine> lines;
-  std::ifstream in(path);
   std::string text;
   for (int number = 1; std::getline(in, text); ++number) {
     if (!text.empty() && text.back() == '\r') text.pop_back();  // dumps are written as CRLF
@@ -102,6 +102,11 @@ inline std::vector<DumpLine> ReadDump(const char* path) {
   return lines;
 }
 
+inline std::vector<DumpLine> ReadDump(const char* path) {
+  std::ifstream in(path, std::ios::binary);
+  return ReadDump(in);
+}
+
 // What a dump says about the run, beyond its events.
 struct DumpInfo {
   int version = 1;
@@ -109,6 +114,7 @@ struct DumpInfo {
   double ticksPerSecond = 0;
   bool ended = false;  // an END line was read
   bool stacksOn = true;
+  bool symbolsOk = true;
   uint64_t eventsLost = 0;
   uint64_t buffersLost = 0;
   std::string exeFile;
@@ -168,6 +174,8 @@ class DumpReplay {
         info.stacksOn = l.Get("stacksOn", 1) != 0;
         info.eventsLost = l.Get("eventsLost");
         info.buffersLost = l.Get("buffersLost");
+      } else if (l.kind == "NAMES") {
+        info.symbolsOk = l.Get("symbolsOk", 1) != 0;
       } else if (l.kind == "EXE" && l.Has("name")) {
         info.exeFile = l.text.at("name");
       } else if (l.kind == "THREADNAME" && l.Has("name")) {

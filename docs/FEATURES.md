@@ -223,3 +223,5 @@ Newest line last. Format: `YYYY-MM-DD  ID  status  note`.
 - 2026-10-16  W17  started  /W4 /WX on every MSVC command in CI, run-demo.ps1 and CLAUDE.md; _wfopen replaced by _wfopen_s, explicit double conversions in the report.
 - 2026-10-16  W17  confirmed  CI run #63: everything builds with /W4 /WX; tests and smoke test pass.
 - 2026-10-16  W18  started  Dump version 2 written by waitwhy.cpp; dump.h reads versions 1 and 2 and replays them; CI keeps the smoke runs' dumps and reports as the smoke-dumps artifact.
+- 2026-10-16  W18  confirmed  CI run #64: version 1 replay unchanged, version 2 replay checks pass, smoke-dumps artifact kept.
+- 2026-10-16  W19  started  report.h builds the report as data and renders the text; --from-dump FILE rebuilds it from a version 2 dump. Golden test tests/golden/slowapp-lock; CI checks that each smoke run's rebuilt report equals its live report.
