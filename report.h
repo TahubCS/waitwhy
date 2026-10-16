@@ -651,7 +651,8 @@ inline std::string RenderText(const Report& r) {
     Appendf(out, "  Function names   : %s\n", names.c_str());
     if (!q.exportModules.empty())
       Appendf(out, "                     (exported names only: a function that is not exported shows\n"
-                   "                     as the nearest exported one, so those names can be wrong)\n");
+                   "                     as the nearest exported one, so those names can be wrong;\n"
+                   "                     --symbols ms downloads Windows' own symbols)\n");
   }
   if (!q.pdbNextToExe.empty())
     Appendf(out, "  Note             : %s does not match the program; build both together (/Zi)\n",

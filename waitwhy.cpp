@@ -532,6 +532,46 @@ std::wstring DosPath(const std::wstring& path) {
   return path;
 }
 
+// --symbols: "ms" for Microsoft's public symbol server, or a DbgHelp symbol path (W27).
+std::wstring g_symbolsOption;
+
+// Where DbgHelp looks for .pdb files: the program's own folder first, then what --symbols or
+// _NT_SYMBOL_PATH say. "ms" downloads Windows' symbols once and keeps them in a local cache.
+std::wstring SymbolSearchPath(const std::wstring& exeDir) {
+  std::wstring extra;
+  if (_wcsicmp(g_symbolsOption.c_str(), L"ms") == 0) {
+    wchar_t local[MAX_PATH];
+    const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH);
+    const std::wstring cache =
+        (n > 0 && n < MAX_PATH ? std::wstring(local, n) : std::wstring(L".")) + L"\\waitwhy\\symbols";
+    extra = L"srv*" + cache + L"*https://msdl.microsoft.com/download/symbols";
+  } else if (!g_symbolsOption.empty()) {
+    extra = g_symbolsOption;
+  } else {
+    wchar_t env[4096];
+    const DWORD n = GetEnvironmentVariableW(L"_NT_SYMBOL_PATH", env, 4096);
+    if (n > 0 && n < 4096) extra.assign(env, n);
+  }
+  std::wstring path = exeDir;
+  if (!extra.empty()) path += (path.empty() ? L"" : L";") + extra;
+  return path;
+}
+
+// A symbol server path needs symsrv.dll beside the dbghelp.dll in use; Windows' own copy in
+// System32 has none. Returns a note when the download cannot work, empty otherwise.
+std::string SymbolServerNote(const std::wstring& path) {
+  if (Lower(Narrow(path)).find("srv*") == std::string::npos) return {};
+  wchar_t dbghelp[MAX_PATH] = L"";
+  const HMODULE m = GetModuleHandleW(L"dbghelp.dll");
+  if (!m || !GetModuleFileNameW(m, dbghelp, MAX_PATH)) return {};
+  std::wstring folder = dbghelp;
+  folder.resize(folder.find_last_of(L"\\") + 1);
+  if (GetFileAttributesW((folder + L"symsrv.dll").c_str()) != INVALID_FILE_ATTRIBUTES) return {};
+  return "Note: Windows symbols cannot be downloaded: " + Narrow(dbghelp) +
+         " has no symsrv.dll beside it.\n      Put dbghelp.dll and symsrv.dll from the Windows SDK "
+         "(Debuggers\\x64) next to waitwhy.exe.\n";
+}
+
 class Symbolizer : public SymbolSource {
  public:
   // When the program has exited: load the modules it had loaded, at the addresses they had,
@@ -544,7 +584,7 @@ class Symbolizer : public SymbolSource {
                   SYMOPT_LOAD_LINES);
     if (!SymInitializeW(proc_, nullptr, FALSE)) return false;
     ok_ = true;
-    std::wstring searchPath;
+    std::wstring exeDir;
     for (const ImageInfo& image : images) {
       const std::wstring dos = DosPath(image.path);
       const size_t slash = dos.find_last_of(L"\\/");
@@ -553,10 +593,11 @@ class Symbolizer : public SymbolSource {
         exeFile_ = Narrow(file);
         exePath_ = dos;
         exeModule_ = Lower(Narrow(file.substr(0, file.size() - 4)));
-        if (slash != std::wstring::npos) searchPath = dos.substr(0, slash);
+        if (slash != std::wstring::npos) exeDir = dos.substr(0, slash);
       }
     }
-    if (!searchPath.empty()) SymSetSearchPathW(proc_, searchPath.c_str());  // the program's .pdb
+    searchPath_ = SymbolSearchPath(exeDir);
+    if (!searchPath_.empty()) SymSetSearchPathW(proc_, searchPath_.c_str());
     for (const ImageInfo& image : images)
       SymLoadModuleExW(proc_, nullptr, DosPath(image.path).c_str(), nullptr, image.base,
                        static_cast<DWORD>(image.size), nullptr, 0);
@@ -564,6 +605,7 @@ class Symbolizer : public SymbolSource {
     return true;
   }
   bool FromImages() const { return fromImages_; }
+  const std::wstring& SearchPath() const { return searchPath_; }
 
   bool Init(uint32_t pid) {
     proc_ = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid);
@@ -581,7 +623,9 @@ class Symbolizer : public SymbolSource {
     }
     SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_FAIL_CRITICAL_ERRORS |
                   SYMOPT_LOAD_LINES);
-    ok_ = SymInitializeW(proc_, nullptr, TRUE) != FALSE;
+    const size_t slash = exePath_.find_last_of(L"\\/");
+    searchPath_ = SymbolSearchPath(slash == std::wstring::npos ? L"" : exePath_.substr(0, slash));
+    ok_ = SymInitializeW(proc_, searchPath_.empty() ? nullptr : searchPath_.c_str(), TRUE) != FALSE;
     if (!ok_) {
       CloseHandle(proc_);
       proc_ = nullptr;
@@ -668,6 +712,7 @@ class Symbolizer : public SymbolSource {
   HANDLE proc_ = nullptr;
   bool ownsHandle_ = true;
   std::wstring exePath_;
+  std::wstring searchPath_;
   bool fromImages_ = false;
   bool ok_ = false;
   std::string exeModule_;
@@ -777,7 +822,8 @@ int ReportFromDump(const std::wstring& path, ReportOptions opt) {
 void Usage() {
   std::printf(
       "usage: waitwhy (--pid N | --name program.exe) [--seconds N] [--top N]\n"
-      "               [--min-ms N] [--stall-ms N] [--dump-events FILE]\n"
+      "               [--min-ms N] [--stall-ms N] [--symbols ms|PATH]\n"
+      "               [--dump-events FILE]\n"
       "       waitwhy --from-dump FILE [--top N] [--min-ms N] [--stall-ms N]\n"
       "  Watches a running program and reports what its threads were waiting on.\n"
       "  --dump-events also writes every context-switch, ready-thread, thread and stack\n"
@@ -787,6 +833,9 @@ void Usage() {
       "  --top N shows the N biggest groups of waits (default 6); --min-ms N hides\n"
       "  groups smaller than N milliseconds (default 10). --stall-ms N reports any\n"
       "  single lock, disk, network or page-fault wait of N ms or more (default 50).\n"
+      "  --symbols ms downloads Windows' own symbols from Microsoft (cached in\n"
+      "  %%LOCALAPPDATA%%\\waitwhy\\symbols); --symbols PATH uses a DbgHelp symbol path.\n"
+      "  Without it, _NT_SYMBOL_PATH is used when set.\n"
       "  Exit codes: 0 report printed, 1 bad arguments or program not found,\n"
       "  2 the kernel trace could not be started (not Administrator, or unavailable).\n");
 }
@@ -821,6 +870,8 @@ int wmain(int argc, wchar_t** argv) {
       shown.stallMs = (std::max)(0.0, std::wcstod(argv[++i], nullptr));
     } else if (a == L"--dump-events" && hasValue) {
       dumpPath = argv[++i];
+    } else if (a == L"--symbols" && hasValue) {
+      g_symbolsOption = argv[++i];
     } else if (a == L"--from-dump" && hasValue) {
       fromDump = argv[++i];
     } else {
@@ -959,6 +1010,7 @@ int wmain(int argc, wchar_t** argv) {
   // A program that exited can no longer be asked for its modules; the trace recorded them.
   Symbolizer sym;
   const bool symbolsOk = (!programExited && sym.Init(pid)) || sym.InitFromImages(g_images);
+  std::fputs(SymbolServerNote(sym.SearchPath()).c_str(), stdout);
   if (g_dump) {
     WriteDumpNames(g_dump, sym, symbolsOk);
     std::fclose(g_dump);

@@ -33,6 +33,14 @@ jobs:
           cl /nologo /W4 /WX /EHsc /O2 /std:c++17 tests\golden_tests.cpp /Fe:golden_tests.exe
           if ($LASTEXITCODE -ne 0) { throw "tests\golden_tests.cpp did not compile" }
 
+          # Same as run-demo.ps1: the SDK's dbghelp.dll and symsrv.dll beside waitwhy.exe (W27).
+          $debuggers = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\Debuggers\x64'
+          foreach ($dll in 'dbghelp.dll', 'symsrv.dll') {
+            $source = Join-Path $debuggers $dll
+            if (Test-Path $source) { Copy-Item $source -Destination . -Force }
+            else { Write-Host "::warning::$source was not found; --symbols ms will not be tested." }
+          }
+
       - name: Unit tests
         shell: pwsh
         run: |
@@ -58,11 +66,11 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
 
-          function Watch-Slowapp([string]$Label, [string[]]$SlowappArgs) {
+          function Watch-Slowapp([string]$Label, [string[]]$SlowappArgs, [string[]]$WaitwhyArgs = @()) {
             $app = Start-Process -FilePath (Resolve-Path .\slowapp.exe) -PassThru -WindowStyle Hidden `
               -ArgumentList (@('--seconds', '20', '--mb', '64') + $SlowappArgs)
             Start-Sleep -Seconds 3
-            $text = & .\waitwhy.exe --pid $app.Id --seconds 8 --dump-events "$Label-events.txt" 2>&1 | Out-String
+            $text = & .\waitwhy.exe --pid $app.Id --seconds 8 --dump-events "$Label-events.txt" @WaitwhyArgs 2>&1 | Out-String
             $code = $LASTEXITCODE
             Set-Content -Path "$Label-report.txt" -Value $text -Encoding utf8
             if (-not $app.HasExited) { Stop-Process -Id $app.Id -ErrorAction SilentlyContinue }
@@ -80,6 +88,9 @@ jobs:
           $fixed = Watch-Slowapp 'fixed' @('--fixed')
           # W26: slowapp exits about 3 s into the 8 s watch; names must come from the trace.
           $exited = Watch-Slowapp 'exited' @('--seconds', '6')
+          # W27: with Microsoft's symbols, ntdll has full names.
+          $symbols = $null
+          if (Test-Path .\symsrv.dll) { $symbols = Watch-Slowapp 'symbols' @() @('--symbols', 'ms') }
 
           # Function names can carry a namespace, e.g. slowapp!`anonymous namespace'::update_frame.
           # In the fixed run saver still waits on the disk, which is fine; only the lock must go.
@@ -99,6 +110,9 @@ jobs:
           if ($exited -notmatch 'the program exited during the trace' -or $exited -notmatch 'slowapp!.*update_frame') {
             $failures += 'Exited run: function names were not found from the modules recorded in the trace.'
           }
+          if ($symbols -and $symbols -notmatch 'Function names   : full names in [^;\r\n]*ntdll') {
+            $failures += 'Symbols run: ntdll has no full names with --symbols ms.'
+          }
 
           # W19: the report rebuilt from each run's dump must equal the live report.
           function Get-ReportPart([string]$Text) {
@@ -107,7 +121,8 @@ jobs:
             return ($Text.Substring($i) -replace "`r", '').TrimEnd()
           }
           foreach ($run in @(@{ Label = 'buggy'; Live = $buggy }, @{ Label = 'fixed'; Live = $fixed },
-                             @{ Label = 'exited'; Live = $exited })) {
+                             @{ Label = 'exited'; Live = $exited }, @{ Label = 'symbols'; Live = $symbols })) {
+            if (-not $run.Live) { continue }
             $offline = & .\waitwhy.exe --from-dump "$($run.Label)-events.txt" 2>&1 | Out-String
             if ($LASTEXITCODE -ne 0 -or (Get-ReportPart $offline) -ne (Get-ReportPart $run.Live)) {
               Write-Host "===== report rebuilt from $($run.Label)-events.txt ====="
@@ -133,6 +148,8 @@ jobs:
             fixed-report.txt
             exited-events.txt
             exited-report.txt
+            symbols-events.txt
+            symbols-report.txt
           if-no-files-found: ignore
 
   # The analysis core (analysis.h) makes no Windows calls (D7), so its tests also run here, with

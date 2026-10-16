@@ -47,6 +47,14 @@ if ($LASTEXITCODE -ne 0) { throw "slowapp.cpp did not compile" }
 cl /nologo /W4 /WX /EHsc /O2 /Zi /std:c++17 waitwhy.cpp /Fe:waitwhy.exe | Out-Host
 if ($LASTEXITCODE -ne 0) { throw "waitwhy.cpp did not compile" }
 
+# Microsoft's redistributable dbghelp.dll and symsrv.dll, when the Windows SDK has them, let
+# "waitwhy --symbols ms" download Windows' own symbols (W27). Windows' copy in System32 cannot.
+$debuggers = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\Debuggers\x64'
+foreach ($dll in 'dbghelp.dll', 'symsrv.dll') {
+    $source = Join-Path $debuggers $dll
+    if (Test-Path $source) { Copy-Item $source -Destination $PSScriptRoot -Force }
+}
+
 # 4. Run slowapp in its own window, then point waitwhy at it.
 function Invoke-Case {
     param([string]$Title, [string[]]$SlowappArgs)

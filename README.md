@@ -67,6 +67,12 @@ To print the report again later, on any machine and without Administrator rights
 
 If the program exits while it is being watched, waitwhy still names its functions: the trace records every module the program had loaded, and waitwhy loads them from disk at the same addresses.
 
+Windows' own DLLs (ntdll, KERNELBASE) come without names for most of their functions. `--symbols ms` downloads their symbols from Microsoft's public symbol server once and keeps them in `%LOCALAPPDATA%\waitwhy\symbols`; `--symbols PATH` takes any DbgHelp symbol path, and without the option `_NT_SYMBOL_PATH` is used when it is set. Downloading needs `dbghelp.dll` and `symsrv.dll` from the Windows SDK (Debuggers\x64) next to `waitwhy.exe`; `run-demo.ps1` copies them when the SDK has them.
+
+```powershell
+.\waitwhy.exe --name slowapp.exe --seconds 5 --symbols ms
+```
+
 Function names only show up for programs that have `.pdb` symbol files next to them (your own debug or `/Zi` builds). For other programs you will see Windows function names (for example `KERNELBASE!ReadFile`) and addresses.
 
 ## How much to trust a report

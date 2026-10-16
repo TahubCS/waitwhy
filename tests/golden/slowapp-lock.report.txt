@@ -70,5 +70,6 @@ Data quality: high
   Wakers known     : 100% of the time in waits that ended
   Function names   : full names in slowapp; only exported names in KERNELBASE, kernel32, ntdll
                      (exported names only: a function that is not exported shows
-                     as the nearest exported one, so those names can be wrong)
+                     as the nearest exported one, so those names can be wrong;
+                     --symbols ms downloads Windows' own symbols)
   Context switches : 12345 seen
