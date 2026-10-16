@@ -143,6 +143,16 @@ inline std::string WakerLabel(const Analyzer& an, uint32_t tid, const ThreadName
   if (tid == kUnknownThread) return "unknown";
   if (an.IsProgramThread(tid)) return name(tid);
   if (tid == kSystemWaker) return "the system (a timer or finished I/O)";
+  auto process = an.threadProcess.find(tid);
+  if (process != an.threadProcess.end()) {
+    if (process->second == Analyzer::kSystemProcess)
+      return "the system (kernel thread " + std::to_string(tid) + ")";
+    auto pname = an.processNames.find(process->second);
+    if (pname != an.processNames.end() && !pname->second.empty())
+      return "outside your program (thread " + std::to_string(tid) + " of " + pname->second + ")";
+    return "outside your program (thread " + std::to_string(tid) + ", process " +
+           std::to_string(process->second) + ")";
+  }
   return "outside your program (thread " + std::to_string(tid) + ")";
 }
 
@@ -262,9 +272,19 @@ inline Report BuildReport(const Analyzer& an, SymbolSource& sym, const ReportOpt
     const Analyzer::FileName* f = an.FileOf(b.fileObject);
     return f ? f->kind : ObjectKind::None;
   };
+  // By name a ReadFile or WriteFile is the disk. When no file request says what it was on, and
+  // a thread rather than the system ended the wait (the other end of a pipe, the console host),
+  // the wait was for that thread (W28).
+  auto categoryOf = [&](const Bucket& b) {
+    const ObjectKind object = objectKind(b);
+    const Category c = Classify(b, sym, object);
+    if (c == Category::Disk && object == ObjectKind::None && an.WokenByAThread(TopWaker(b), b.tid))
+      return Category::OtherThread;
+    return c;
+  };
   for (const auto& [key, b] : an.buckets) {
     if (idle(b.tid)) continue;
-    const Category c = Classify(b, sym, objectKind(b));
+    const Category c = categoryOf(b);
     const std::string code = YourCodeFrame(b, sym);
     WaitGroup& g = groupMap[{b.tid, static_cast<int>(c), code}];
     g.tid = b.tid;
@@ -288,7 +308,7 @@ inline Report BuildReport(const Analyzer& an, SymbolSource& sym, const ReportOpt
   for (const auto& [key, b] : an.buckets) {
     if (idle(b.tid)) continue;
     groupOfBucket[key] =
-        &groupMap.at({b.tid, static_cast<int>(Classify(b, sym, objectKind(b))), YourCodeFrame(b, sym)});
+        &groupMap.at({b.tid, static_cast<int>(categoryOf(b)), YourCodeFrame(b, sym)});
   }
 
   // What thread `waker` did during the waits of `waiter` in `g` that it ended (W25).

@@ -23,6 +23,8 @@
 //   FILEIO     ts op=0 tid irp fileObject          a file I/O request of the program starts (W28)
 //   FILEIO     ts op=1 irp                         ... and ends
 //   FILENAME   fileObject kind name=<path>         the name of a file object the program used
+//   THREADPID  tid pid                             the process of a thread that woke the program
+//   PROCESS    pid name=<file name>                the name of such a process
 //   EXE        name=<file name of the program>
 //   SYMBOL     addr name=<module!function>         every address in the report's stacks
 //   SOURCE     addr file=<source file, lower case>
@@ -278,6 +280,10 @@ class DumpReplay {
       e.kind = static_cast<ObjectKind>(l.Get("kind"));
       e.path = l.Has("name") ? l.text.at("name") : std::string();
       an_.OnFileIo(e);
+    } else if (l.kind == "THREADPID") {
+      an_.threadProcess[static_cast<uint32_t>(l.Get("tid"))] = static_cast<uint32_t>(l.Get("pid"));
+    } else if (l.kind == "PROCESS") {
+      an_.processNames[static_cast<uint32_t>(l.Get("pid"))] = l.Has("name") ? l.text.at("name") : "";
     } else if (l.kind == "SNAPSHOT") {
       an_.ApplySnapshot(static_cast<uint32_t>(l.Get("tid")),
                         l.Has("frames") ? ParseFrames(l.text.at("frames")) : std::vector<uint64_t>{});

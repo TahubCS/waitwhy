@@ -200,9 +200,10 @@ jobs:
           $cases = @(
             @{ Mode = 'condvar'; Hard = @('\(main\) spent \d+% of the time waiting for another thread or an event to signal it, in scenarios!.*wait_for_result') },
             @{ Mode = 'coldread'; Hard = @('\(main\) spent \d+% of the time waiting for the disk, in scenarios!.*read_cold_file') },
-            @{ Mode = 'console'; Args = @('--min-ms', '0'); Soft = @('Object     : the console window') },
-            @{ Mode = 'pipe'; Hard = @('\(client\) spent \d+% of the time .*, in scenarios!.*pipe_round_trip');
-               Soft = @('\(client\) spent \d+% of the time waiting for another thread or an event to signal it, in scenarios!.*pipe_round_trip') },
+            @{ Mode = 'console'; Args = @('--min-ms', '0'); Not = @('waiting for the disk, in scenarios!.*print_lines');
+               Soft = @('\(main\) spent \d+% of the time waiting for another thread or an event to signal it, in scenarios!.*print_lines',
+                        'thread \d+ of conhost\.exe') },
+            @{ Mode = 'pipe'; Hard = @('\(client\) spent \d+% of the time waiting for another thread or an event to signal it, in scenarios!.*pipe_round_trip') },
             @{ Mode = 'socket'; Hard = @('\(client\) spent \d+% of the time waiting for the network, in scenarios!.*socket_round_trip') },
             @{ Mode = 'cpu'; Hard = @('spent \d+% of the time ready to run but waiting for a free CPU') },
             @{ Mode = 'child'; Hard = @('\(main\) spent \d+% of the time waiting for another thread or an event to signal it, in scenarios!.*wait_for_child') },
@@ -227,6 +228,9 @@ jobs:
             if ($code -ne 0) { $failures += "$($c.Mode): waitwhy exited with code $code"; continue }
             foreach ($h in @($c.Hard | Where-Object { $_ })) {
               if ($text -notmatch $h) { $failures += "$($c.Mode): the report does not match /$h/" }
+            }
+            foreach ($n in @($c.Not | Where-Object { $_ })) {
+              if ($text -match $n) { $failures += "$($c.Mode): the report should not match /$n/" }
             }
             foreach ($soft in @($c.Soft | Where-Object { $_ })) {
               if ($text -notmatch $soft) { Write-Host "::warning::$($c.Mode): the report does not match /$soft/ (not required yet)" }

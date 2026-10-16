@@ -952,6 +952,32 @@ class Symbolizer : public SymbolSource {
 // Turning stacks into plain English (the rules live in analysis.h)
 // ---------------------------------------------------------------------------
 
+// Names the processes of the threads outside the program that woke it (W28), for the report.
+void NameWakerProcesses() {
+  Analyzer& an = g_analysis;
+  for (const auto& [key, b] : an.buckets) {
+    for (const auto& [waker, ticks] : b.wakers) {
+      (void)ticks;
+      auto it = an.threadProcess.find(waker);
+      if (an.IsProgramThread(waker) || it == an.threadProcess.end()) continue;
+      const uint32_t owner = it->second;
+      if (an.processNames.count(owner)) continue;
+      std::string label = owner == Analyzer::kSystemProcess ? "System" : "";
+      if (HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, owner)) {
+        wchar_t path[MAX_PATH];
+        DWORD len = MAX_PATH;
+        if (QueryFullProcessImageNameW(process, 0, path, &len)) {
+          const std::wstring full(path, len);
+          const size_t slash = full.find_last_of(L"\\/");
+          label = Narrow(slash == std::wstring::npos ? full : full.substr(slash + 1));
+        }
+        CloseHandle(process);
+      }
+      an.processNames[owner] = label;
+    }
+  }
+}
+
 // Ends a dump with every name the report uses (W18), so the report can be rebuilt from the
 // dump alone: the program's file, each address in a wait's stack, and the thread labels.
 void WriteDumpNames(FILE* out, Symbolizer& sym, bool symbolsOk) {
@@ -976,6 +1002,23 @@ void WriteDumpNames(FILE* out, Symbolizer& sym, bool symbolsOk) {
     std::fprintf(out, "MODULE symbols=%s name=%s\n",
                  kind == SymbolKind::Full ? "full" : kind == SymbolKind::ExportsOnly ? "exports" : "none",
                  module.c_str());
+  std::map<uint32_t, uint32_t> wakerProcess;  // sorted, like the rest
+  for (const auto& [key, b] : an.buckets)
+    for (const auto& [waker, ticks] : b.wakers) {
+      (void)ticks;
+      auto it = an.threadProcess.find(waker);
+      if (!an.IsProgramThread(waker) && it != an.threadProcess.end()) wakerProcess[waker] = it->second;
+    }
+  std::map<uint32_t, bool> processes;
+  for (const auto& [waker, owner] : wakerProcess) {
+    std::fprintf(out, "THREADPID tid=%u pid=%u\n", waker, owner);
+    processes[owner] = true;
+  }
+  for (const auto& [owner, unused] : processes) {
+    (void)unused;
+    auto it = an.processNames.find(owner);
+    std::fprintf(out, "PROCESS pid=%u name=%s\n", owner, it == an.processNames.end() ? "" : it->second.c_str());
+  }
   std::map<uint32_t, bool> tids;
   for (const auto& [tid, st] : an.threads) tids[tid] = true;
   for (uint32_t tid : an.targetThreads) tids[tid] = true;
@@ -1362,6 +1405,7 @@ int wmain(int argc, wchar_t** argv) {
   SnapshotThreadsStillBlocked();
   g_analysis.FlushAtEnd();
   // A program that exited can no longer be asked for its modules; the trace recorded them.
+  NameWakerProcesses();
   Symbolizer sym;
   const bool symbolsOk = (!programExited && sym.Init(pid)) || sym.InitFromImages(g_images);
   std::fputs(SymbolServerNote(sym.SearchPath()).c_str(), stdout);

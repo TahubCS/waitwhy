@@ -299,6 +299,13 @@ class Analyzer {
   std::unordered_map<uint64_t, FileName> unclaimedNames;
   static constexpr size_t kMaxUnclaimedNames = size_t{1} << 18;
 
+  // The process of every thread the trace reported (the rundown names all of them), and the
+  // names of the processes whose threads woke the program (filled in before the report). With
+  // these a waker outside the program is a named program, or the system (W28).
+  std::unordered_map<uint32_t, uint32_t> threadProcess;
+  std::unordered_map<uint32_t, std::string> processNames;
+  static constexpr uint32_t kSystemProcess = 4;
+
   bool IsTarget(uint32_t tid) const { return targetThreads.count(tid) != 0; }
   bool IsProgramThread(uint32_t tid) const {
     return targetThreads.count(tid) != 0 || exitedThreads.count(tid) != 0;
@@ -385,6 +392,7 @@ class Analyzer {
   }
 
   void OnThread(const ThreadEvent& e) {
+    if (e.kind != ThreadEvent::Kind::Ended) threadProcess[e.tid] = e.pid;
     if (e.pid != pid) return;
     if (e.kind == ThreadEvent::Kind::Ended) {
       OnThreadEnd(e);
@@ -437,6 +445,15 @@ class Analyzer {
     if (st != threads.end()) st->second.ioInFlight.erase(e.irp);
     irpThread.erase(it);
     return true;
+  }
+
+  // True when `waker` is a thread, not the system: another thread of the program, or a thread of
+  // another user-mode process. A wait that one of them ended was a wait for that thread (W28).
+  bool WokenByAThread(uint32_t waker, uint32_t waiter) const {
+    if (waker == kUnknownThread || waker == kSystemWaker || waker == waiter) return false;
+    if (IsProgramThread(waker)) return true;
+    auto it = threadProcess.find(waker);
+    return it != threadProcess.end() && it->second != 0 && it->second != kSystemProcess;
   }
 
   const FileName* FileOf(uint64_t fileObject) const {

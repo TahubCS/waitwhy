@@ -8,6 +8,7 @@
 //   g++ -std=c++17 -Wall -Wextra tests/analysis_tests.cpp -o analysis_tests
 
 #include "../analysis.h"
+#include "../report.h"
 #include "check.h"
 
 #include <string>
@@ -419,6 +420,70 @@ void CheckObjectClassification() {
   ExpectEq("wait on the outer request's file", nested.threads.at(9).open.fileObject, 0xA1);
 }
 
+// W28: a ReadFile or WriteFile that another thread ended (a pipe's other end, the console host)
+// was a wait for that thread, not for the disk (scenarios pipe and console, CI run #78).
+void CheckWakerRefinesDisk() {
+  std::printf("Waits ended by a thread are not the disk (W28)\n");
+  FakeSymbols sym;
+  const auto pipeRead = sym.Stack({"ntdll!NtReadFile", "KERNELBASE!ReadFile", "slowapp!pipe_round_trip"});
+  const auto console = sym.Stack({"ntdll!NtWriteFile", "KERNELBASE!WriteFile", "slowapp!print_lines"});
+  const auto disk = sym.Stack({"ntdll!NtWriteFile", "KERNELBASE!WriteFile", "slowapp!save"});
+  Analyzer an;
+  an.pid = 1;
+  an.stacksOn = true;
+  an.targetThreads = {1, 2, 3, 4};
+  ThreadEvent conhost;
+  conhost.pid = 900;
+  conhost.tid = 50;
+  conhost.kind = ThreadEvent::Kind::Existing;
+  an.OnThread(conhost);
+  an.processNames[900] = "conhost.exe";
+  auto wait = [&an](uint32_t tid, uint32_t waker, const std::vector<uint64_t>& stack) {
+    SwitchEvent e;
+    e.ts = 100;
+    e.oldTid = tid;
+    e.newTid = 0;
+    e.oldState = kThreadStateWaiting;
+    an.OnSwitch(e);
+    ReadyEvent r;
+    r.ts = 150;
+    r.readiedTid = tid;
+    r.byTid = waker;
+    an.OnReady(r);
+    e = SwitchEvent{};
+    e.ts = 200;
+    e.oldTid = 0;
+    e.newTid = tid;
+    an.OnSwitch(e);
+    StackEvent st;
+    st.ts = 201;
+    st.eventTs = 200;
+    st.tid = tid;
+    st.userFrames = stack;
+    an.OnStack(st);
+  };
+  wait(1, 2, pipeRead);
+  wait(3, 50, console);
+  wait(4, kSystemWaker, disk);
+  an.lastTs = 300;
+  an.FlushAtEnd();
+  ReportOptions opt;
+  opt.ticksPerSecond = 1000;
+  opt.minMs = 0;
+  const Report r = BuildReport(an, sym, opt, [](uint32_t t) { return "Thread " + std::to_string(t); });
+  auto row = [&r](uint32_t tid) -> const WaitRow* {
+    for (const WaitRow& w : r.waits)
+      if (w.tid == tid) return &w;
+    return nullptr;
+  };
+  ExpectCategory("read ended by another program thread", row(1) ? row(1)->category : Category::Other,
+                 Category::OtherThread);
+  ExpectCategory("write ended by the console host", row(3) ? row(3)->category : Category::Other,
+                 Category::OtherThread);
+  ExpectStr("console host named", row(3) ? row(3)->wokenBy : "", "outside your program (thread 50 of conhost.exe)");
+  ExpectCategory("write ended by the system", row(4) ? row(4)->category : Category::Other, Category::Disk);
+}
+
 }  // namespace
 
 int main() {
@@ -434,6 +499,7 @@ int main() {
   CheckWindowAndLifetime();
   CheckDurationHistogram();
   CheckObjectClassification();
+  CheckWakerRefinesDisk();
   std::printf(Failures() ? "%d check(s) failed.\n" : "All checks passed.\n", Failures());
   return Failures() ? 1 : 0;
 }
