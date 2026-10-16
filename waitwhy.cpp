@@ -208,7 +208,6 @@ std::vector<uint32_t> g_cpuThread(256, kUnknownThread);  // thread currently on 
 // Reading a recorded .etl file (W38): nothing may be asked of the live system, whose processes
 // and threads may be others with the same IDs.
 bool g_fromTraceFile = false;
-uint64_t g_stackWalkEvents = 0;  // all StackWalk events seen, whichever thread they were for
 std::atomic<bool> g_stopRequested{false};
 // End of the observation window, set by the main thread when it stops watching; 0 until then
 // (W20). Events stamped later are still delivered until the session stops; they are not counted.
@@ -322,7 +321,6 @@ void OnThreadEvent(const EVENT_RECORD* ev, ThreadEvent::Kind kind) {
 void OnStackWalk(const EVENT_RECORD* ev) {
   // Layout: uint64 EventTimeStamp, uint32 StackProcess, uint32 StackThread, then addresses.
   if (ev->UserDataLength < 16) return;
-  ++g_stackWalkEvents;
   const auto* p = static_cast<const uint8_t*>(ev->UserData);
   StackEvent e;
   e.ts = static_cast<uint64_t>(ev->EventHeader.TimeStamp.QuadPart);
@@ -366,30 +364,47 @@ struct ImageInfo {
   std::wstring path;  // as the kernel names it, e.g. \Device\HarddiskVolume3\...\ntdll.dll
 };
 std::map<uint32_t, std::vector<ImageInfo>> g_images;  // by process
-// The processes a recorded trace holds (W38), in the order first seen: ID -> file name.
+// What the first pass over a recorded trace found (W38), from start, end and rundown
+// events alike, since a circular trace keeps only its last part: the processes in the order
+// first seen (ID -> file name, parent), every thread's process, and every process's modules.
 std::map<uint32_t, std::string> g_traceProcessNames;
 std::vector<uint32_t> g_traceProcessOrder;
+std::map<uint32_t, uint32_t> g_traceParents;
+struct TraceThread {
+  uint32_t pid = 0;
+  uint64_t endedAt = 0;  // 0: still running at the end of the trace
+};
+std::map<uint32_t, TraceThread> g_traceThreads;
+std::map<uint32_t, std::vector<ImageInfo>> g_traceImages;
+uint64_t g_traceFirstTs = 0;  // the earliest event the file still holds
+uint64_t g_traceStackWalks = 0;  // its StackWalk events: whether it has call stacks at all
 
-void OnImage(const EVENT_RECORD* ev) {
-  // Image_Load (versions 2 and 3): ImageBase, ImageSize (pointers), ProcessId, ImageCheckSum,
-  // TimeDateStamp, a 32-bit field, DefaultBase (pointer), four reserved 32-bit fields, then the
-  // file name as a null-terminated UTF-16 string.
+// Image_Load (versions 2 and 3, also its rundowns): ImageBase, ImageSize (pointers), ProcessId,
+// ImageCheckSum, TimeDateStamp, a 32-bit field, DefaultBase (pointer), four reserved 32-bit
+// fields, then the file name as a null-terminated UTF-16 string. With `watchedOnly`, the name
+// is only read for the program's processes.
+bool ParseImage(const EVENT_RECORD* ev, bool watchedOnly, uint32_t* pid, ImageInfo* image) {
   const size_t ptr = (ev->EventHeader.Flags & EVENT_HEADER_FLAG_64_BIT_HEADER) ? 8 : 4;
   const size_t nameAt = 3 * ptr + 32;
-  if (ev->UserDataLength < nameAt + sizeof(wchar_t)) return;
+  if (ev->UserDataLength < nameAt + sizeof(wchar_t)) return false;
   const auto* p = static_cast<const uint8_t*>(ev->UserData);
-  uint32_t pid = 0;
-  std::memcpy(&pid, p + 2 * ptr, sizeof pid);
-  if (!g_analysis.IsWatched(pid)) return;
-  ImageInfo image;
-  std::memcpy(&image.base, p, ptr);
-  std::memcpy(&image.size, p + ptr, ptr);
+  std::memcpy(pid, p + 2 * ptr, sizeof *pid);
+  if (watchedOnly && !g_analysis.IsWatched(*pid)) return false;
+  std::memcpy(&image->base, p, ptr);
+  std::memcpy(&image->size, p + ptr, ptr);
   for (size_t at = nameAt; at + sizeof(wchar_t) <= ev->UserDataLength; at += sizeof(wchar_t)) {
     wchar_t ch;
     std::memcpy(&ch, p + at, sizeof ch);
     if (ch == L'\0') break;
-    image.path += ch;
+    image->path += ch;
   }
+  return true;
+}
+
+void OnImage(const EVENT_RECORD* ev) {
+  uint32_t pid = 0;
+  ImageInfo image;
+  if (!ParseImage(ev, true, &pid, &image)) return;
   if (g_dump) {
     std::fprintf(g_dump, "IMAGE ts=%llu base=0x%llx size=0x%llx name=%s\n",
                  static_cast<unsigned long long>(ev->EventHeader.TimeStamp.QuadPart),
@@ -634,22 +649,55 @@ void WINAPI OnEvent(PEVENT_RECORD ev) {
   }
 }
 
-// The first pass over a recorded trace (W38): which processes it holds, by ID and file name.
-void WINAPI OnProcessListEvent(PEVENT_RECORD ev) {
+// The first pass over a recorded trace (W38): its processes, threads and modules.
+constexpr UCHAR kOpDcEnd = 4;  // Process, Thread and Image classes: still there when the trace ended
+
+void WINAPI OnTraceListEvent(PEVENT_RECORD ev) {
   const EVENT_HEADER& h = ev->EventHeader;
   const UCHAR op = h.EventDescriptor.Opcode;
-  if (!IsEqualGUID(h.ProviderId, kProcessGuid) || (op != kOpProcessStart && op != kOpProcessDcStart)) return;
-  const EventFields& f = EventFieldsOf(ev);
-  const int at = f.Offset(L"ProcessId");
-  if (!f.ok || at < 0 || static_cast<size_t>(at) + 4 > ev->UserDataLength) return;
-  uint32_t pid = 0;
-  std::memcpy(&pid, static_cast<const uint8_t*>(ev->UserData) + at, sizeof pid);
-  if (g_traceProcessNames.count(pid)) return;  // an ID used again later keeps its first process
-  const std::vector<BYTE> name = EventProperty(ev, L"ImageFileName");  // an ANSI string
-  size_t length = 0;
-  while (length < name.size() && name[length] != 0) ++length;
-  g_traceProcessNames[pid] = std::string(reinterpret_cast<const char*>(name.data()), length);
-  g_traceProcessOrder.push_back(pid);
+  const auto ts = static_cast<uint64_t>(h.TimeStamp.QuadPart);
+  if (g_traceFirstTs == 0 || ts < g_traceFirstTs) g_traceFirstTs = ts;
+  const auto* data = static_cast<const uint8_t*>(ev->UserData);
+  if (IsEqualGUID(h.ProviderId, kStackWalkGuid) && op == kOpStackWalk) {
+    ++g_traceStackWalks;
+  } else if (IsEqualGUID(h.ProviderId, kThreadGuid)) {
+    if ((op != kOpThreadStart && op != kOpThreadDcStart && op != kOpDcEnd && op != kOpThreadEnd) ||
+        ev->UserDataLength < 8)
+      return;
+    uint32_t pid = 0, tid = 0;
+    std::memcpy(&pid, data, sizeof pid);
+    std::memcpy(&tid, data + 4, sizeof tid);
+    TraceThread& t = g_traceThreads[tid];
+    t.pid = pid;
+    t.endedAt = op == kOpThreadEnd ? ts : 0;
+  } else if (IsEqualGUID(h.ProviderId, kImageGuid)) {
+    if (op != kOpImageLoad && op != kOpImageDcStart && op != kOpDcEnd) return;
+    uint32_t pid = 0;
+    ImageInfo image;
+    if (!ParseImage(ev, false, &pid, &image)) return;
+    std::vector<ImageInfo>& images = g_traceImages[pid];
+    for (const ImageInfo& known : images)
+      if (known.base == image.base && known.path == image.path) return;
+    images.push_back(std::move(image));
+  } else if (IsEqualGUID(h.ProviderId, kProcessGuid)) {
+    if (op != kOpProcessStart && op != kOpProcessDcStart && op != kOpDcEnd) return;
+    const EventFields& f = EventFieldsOf(ev);
+    const int at = f.Offset(L"ProcessId"), parentAt = f.Offset(L"ParentId");
+    if (!f.ok || at < 0 || static_cast<size_t>(at) + 4 > ev->UserDataLength) return;
+    uint32_t pid = 0;
+    std::memcpy(&pid, data + at, sizeof pid);
+    if (g_traceProcessNames.count(pid)) return;  // an ID used again later keeps its first process
+    if (parentAt >= 0 && static_cast<size_t>(parentAt) + 4 <= ev->UserDataLength) {
+      uint32_t parent = 0;
+      std::memcpy(&parent, data + parentAt, sizeof parent);
+      g_traceParents[pid] = parent;
+    }
+    const std::vector<BYTE> name = EventProperty(ev, L"ImageFileName");  // an ANSI string
+    size_t length = 0;
+    while (length < name.size() && name[length] != 0) ++length;
+    g_traceProcessNames[pid] = std::string(reinterpret_cast<const char*>(name.data()), length);
+    g_traceProcessOrder.push_back(pid);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1313,7 +1361,8 @@ int PrintReport(double ticksPerSecond, ReportOptions opt, const SessionProps& st
   opt.stacksOn = stacksOn;
   opt.symbolsOk = symbolsOk;
   opt.exeFile = sym.ExeFile();
-  opt.namesFromTrace = sym.FromImages();
+  // A recorded trace is always named from its modules (W38); that is no news there.
+  opt.namesFromTrace = sym.FromImages() && !g_fromTraceFile;
   opt.pdbNextToExe = sym.PdbNextToExe();
   const SymbolsFor symbols([&symbolsFor](uint32_t pid) -> SymbolSource& { return symbolsFor(pid); });
   const Report report = BuildReport(g_analysis, symbols, opt, ProgramThreadLabel);
@@ -1456,7 +1505,7 @@ int AnalyzeTraceFile(const std::wstring& path, ReportOptions opt, uint32_t pid, 
   g_fromTraceFile = true;
   TRACE_LOGFILE_HEADER header{};
   ULONG error = 0;
-  if (!ReadTraceFile(path, OnProcessListEvent, &header, &error)) {
+  if (!ReadTraceFile(path, OnTraceListEvent, &header, &error)) {
     std::printf("Cannot read the trace %s (error %lu). Is it an .etl file?\n", Narrow(path).c_str(), error);
     return kExitUsage;
   }
@@ -1493,21 +1542,50 @@ int AnalyzeTraceFile(const std::wstring& path, ReportOptions opt, uint32_t pid, 
   }
   g_analysis.pid = pid;
   g_analysis.otherPids.insert(others.begin(), others.end());
+  const double ticksPerSecond = TraceTicksPerSecond(header);
   const bool sameProgram = record.found && record.pid == pid;
   if (sameProgram) {
-    // The window waitwhy record watched; events before it set the threads' states.
-    g_analysis.firstTs = record.start;
+    // The window waitwhy record watched; events before it set the threads' states. A circular
+    // trace (WPR in memory mode, for one) may no longer hold its start.
+    g_analysis.firstTs = (std::max)(record.start, g_traceFirstTs);
+    if (record.end > g_analysis.firstTs && g_traceFirstTs > record.start + static_cast<uint64_t>(ticksPerSecond / 10))
+      std::printf("Note: the trace holds only the last %s of the %s recorded (a circular trace keeps its end).\n",
+                  FormatDuration(static_cast<double>(record.end - g_analysis.firstTs) / ticksPerSecond).c_str(),
+                  FormatDuration(static_cast<double>(record.end - record.start) / ticksPerSecond).c_str());
     g_windowEnd.store(record.end, std::memory_order_relaxed);
     g_threadNames.insert(record.threadNames.begin(), record.threadNames.end());
   }
+  // The program's processes and threads are known before the events are read, so the waits of
+  // a thread whose start the file no longer holds count too.
+  if (g_followChildren)
+    for (bool grew = true; grew;) {
+      grew = false;
+      for (const auto& [child, parent] : g_traceParents)
+        if (g_analysis.IsWatched(parent) && !g_analysis.IsWatched(child)) {
+          g_analysis.otherPids.insert(child);
+          grew = true;
+        }
+    }
+  const uint64_t windowStart = g_analysis.firstTs ? g_analysis.firstTs : g_traceFirstTs;
+  for (const auto& [tid, t] : g_traceThreads) {
+    g_analysis.threadProcess.emplace(tid, t.pid);
+    if (g_analysis.IsWatched(t.pid) && (t.endedAt == 0 || t.endedAt >= windowStart))
+      g_analysis.targetThreads.insert(tid);
+  }
+  // The analysis must know before the first event whether stacks will follow the waits.
+  g_analysis.stacksOn = g_traceStackWalks > 0;
+  if (!g_analysis.stacksOn)
+    std::printf("Note: %s has no call stacks; record with call stacks on context switches for the\n"
+                "      functions waits were in (waitwhy record does).\n",
+                Narrow(path).c_str());
   if (!ReadTraceFile(path, OnEvent, &header, &error)) {
     std::printf("Cannot read the trace %s (error %lu).\n", Narrow(path).c_str(), error);
     return kExitUsage;
   }
   if (sameProgram && record.end > record.start) g_analysis.lastTs = record.end;
+  for (uint32_t process : WatchedProcesses()) g_images[process] = g_traceImages[process];
   for (const auto& [tid, threadName] : g_traceThreadNames) g_threadNames.emplace(tid, threadName);
-  const bool stacksOn = g_stackWalkEvents > 0;
-  g_analysis.stacksOn = stacksOn;
+  const bool stacksOn = g_analysis.stacksOn;
   g_analysis.FlushAtEnd();
   NameWakerProcesses();
   std::map<uint32_t, std::unique_ptr<Symbolizer>> symbolizers;
@@ -1525,7 +1603,7 @@ int AnalyzeTraceFile(const std::wstring& path, ReportOptions opt, uint32_t pid, 
   lost.props.EventsLost = header.EventsLost;
   lost.props.RealTimeBuffersLost = header.BuffersLost;
   if (!g_output.json && !g_output.html) std::printf("Report from the trace %s.\n", Narrow(path).c_str());
-  return PrintReport(TraceTicksPerSecond(header), opt, lost, stacksOn, symbolsFor, sym.Ok());
+  return PrintReport(ticksPerSecond, opt, lost, stacksOn, symbolsFor, sym.Ok());
 }
 
 void Usage() {
