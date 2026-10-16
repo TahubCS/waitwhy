@@ -549,9 +549,11 @@ class Analyzer {
     if (w.wokenBy != kUnknownThread) b.wakers[w.wokenBy] += d;
   }
 
-  // The file object a thread that blocks now is waiting on (W28): the most recent of its
-  // requests still in flight. Not every request reports its completion, so requests older
-  // than kStaleIo are forgotten, and a thread that goes to sleep has none in flight at all.
+  // The file object a thread that blocks now is waiting on (W28): the oldest of its requests
+  // still in flight. That is the program's own call; the file system can start more requests
+  // inside it (metadata, the log), which have no name of their own. Not every request reports
+  // its completion, so requests older than kStaleIo are forgotten, and a thread that goes to
+  // sleep has none in flight at all.
   static constexpr uint64_t kStaleIo = 50000000;  // 5 s of 10 MHz ticks
   uint64_t FileObjectInFlight(ThreadState& st, uint64_t ts, int8_t reason) {
     const bool sleeping = reason == 4 || reason == 11;  // DelayExecution, WrDelayExecution
@@ -562,7 +564,7 @@ class Analyzer {
         it = st.ioInFlight.erase(it);
         continue;
       }
-      if (!best || it->second.began >= bestBegan) best = it->second.fileObject, bestBegan = it->second.began;
+      if (!best || it->second.began < bestBegan) best = it->second.fileObject, bestBegan = it->second.began;
       ++it;
     }
     return best;

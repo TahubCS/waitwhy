@@ -392,6 +392,31 @@ void CheckObjectClassification() {
     if (b.fileObject) withObject += b.count;
   ExpectEq("waits given the lost request's file", withObject, 0);
   ExpectEq("lost request forgotten", stale.threads.at(8).ioInFlight.size(), 0);
+
+  // The program's write, then the file system's own metadata request inside it: the wait is
+  // the program's write (CI run #77).
+  Analyzer nested;
+  nested.pid = 1;
+  nested.targetThreads = {9};
+  FileIoEvent outer;
+  outer.op = FileIoEvent::Op::Begin;
+  outer.ts = 5;
+  outer.tid = 9;
+  outer.irp = 0x30;
+  outer.fileObject = 0xA1;
+  nested.OnFileIo(outer);
+  FileIoEvent inner = outer;
+  inner.ts = 8;
+  inner.irp = 0x31;
+  inner.fileObject = 0xA2;
+  nested.OnFileIo(inner);
+  SwitchEvent s;
+  s.ts = 10;
+  s.oldTid = 9;
+  s.newTid = 0;
+  s.oldState = kThreadStateWaiting;
+  nested.OnSwitch(s);
+  ExpectEq("wait on the outer request's file", nested.threads.at(9).open.fileObject, 0xA1);
 }
 
 }  // namespace
