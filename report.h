@@ -174,6 +174,18 @@ struct WaitGroup {
   std::map<std::string, uint64_t> objects;  // W28
 };
 
+// What a bucket of waits was on, as the report says it (W28): the names, refined by the object
+// of its file I/O, and a ReadFile or WriteFile that a thread rather than the system ended is a
+// wait for that thread.
+inline Category CategoryOfBucket(const Analyzer& an, const Bucket& b, SymbolSource& sym) {
+  const Analyzer::FileName* f = an.FileOf(b.fileObject);
+  const ObjectKind object = f ? f->kind : ObjectKind::None;
+  const Category c = Classify(b, sym, object);
+  if (c == Category::Disk && object == ObjectKind::None && an.WokenByAThread(TopWaker(b), b.tid))
+    return Category::OtherThread;
+  return c;
+}
+
 inline uint32_t TopWaker(const WaitGroup& g) {
   uint32_t best = kUnknownThread;
   uint64_t bestTicks = 0;
@@ -274,21 +286,7 @@ inline Report BuildReport(const Analyzer& an, const SymbolsFor& symbolsFor, cons
   // Group the waits by activity (W22). The map keeps groups in a fixed order, and the sort keeps
   // ties in that order.
   std::map<std::tuple<uint32_t, int, std::string>, WaitGroup> groupMap;
-  // The object of a bucket's file I/O, once its name is known (W28).
-  auto objectKind = [&an](const Bucket& b) {
-    const Analyzer::FileName* f = an.FileOf(b.fileObject);
-    return f ? f->kind : ObjectKind::None;
-  };
-  // By name a ReadFile or WriteFile is the disk. When no file request says what it was on, and
-  // a thread rather than the system ended the wait (the other end of a pipe, the console host),
-  // the wait was for that thread (W28).
-  auto categoryOf = [&](const Bucket& b) {
-    const ObjectKind object = objectKind(b);
-    const Category c = Classify(b, symOf(b.tid), object);
-    if (c == Category::Disk && object == ObjectKind::None && an.WokenByAThread(TopWaker(b), b.tid))
-      return Category::OtherThread;
-    return c;
-  };
+  auto categoryOf = [&](const Bucket& b) { return CategoryOfBucket(an, b, symOf(b.tid)); };
   for (const auto& [key, b] : an.buckets) {
     if (idle(b.tid)) continue;
     const Category c = categoryOf(b);

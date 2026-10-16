@@ -64,6 +64,7 @@
 #include "dump.h"
 #include "report.h"
 #include "diff.h"
+#include "export.h"
 
 #ifdef _MSC_VER
 #pragma comment(lib, "advapi32.lib")
@@ -1154,6 +1155,7 @@ void WriteDumpNames(FILE* out, const SymbolizerFor& symbolsFor, bool symbolsOk, 
 struct Output {
   bool json = false;
   std::wstring file;
+  std::wstring chromeFile, speedscopeFile;  // --export-chrome, --export-speedscope (W37)
   FILE* console = nullptr;  // where JSON for the console goes; everything else goes to stderr
 };
 Output g_output;
@@ -1188,6 +1190,36 @@ int WriteReport(const Report& report) {
   return kExitOk;
 }
 
+constexpr char kVersion[] = "0.9.0";
+
+bool WriteTextFile(const std::wstring& file, const std::string& text, const char* what) {
+  FILE* f = nullptr;
+  if (_wfopen_s(&f, file.c_str(), L"wb") != 0 || !f) {
+    std::printf("Cannot write %s to %s.\n", what, Narrow(file).c_str());
+    return false;
+  }
+  std::fputs(text.c_str(), f);
+  std::fclose(f);
+  std::printf("Wrote %s to %s.\n", what, Narrow(file).c_str());
+  return true;
+}
+
+// --export-chrome and --export-speedscope (W37): the threads' timelines for other viewers.
+int WriteExports(const Analyzer& an, const SymbolsFor& symbolsFor, const ThreadNamer& name,
+                 double ticksPerSecond, const std::string& program) {
+  int code = kExitOk;
+  if (!g_output.chromeFile.empty() &&
+      !WriteTextFile(g_output.chromeFile, ExportChromeTrace(an, symbolsFor, name, ticksPerSecond, program),
+                     "the Chrome trace"))
+    code = kExitUsage;
+  if (!g_output.speedscopeFile.empty() &&
+      !WriteTextFile(g_output.speedscopeFile,
+                     ExportSpeedscope(an, symbolsFor, name, ticksPerSecond, program, kVersion),
+                     "the speedscope profile"))
+    code = kExitUsage;
+  return code;
+}
+
 // Thread labels; with several processes, threads of the others say which process (W33).
 std::string ProgramThreadLabel(uint32_t tid) {
   std::string label = ThreadLabel(tid);
@@ -1207,10 +1239,11 @@ int PrintReport(double ticksPerSecond, ReportOptions opt, const SessionProps& st
   opt.exeFile = sym.ExeFile();
   opt.namesFromTrace = sym.FromImages();
   opt.pdbNextToExe = sym.PdbNextToExe();
-  const Report report = BuildReport(
-      g_analysis, SymbolsFor([&symbolsFor](uint32_t pid) -> SymbolSource& { return symbolsFor(pid); }),
-      opt, ProgramThreadLabel);
-  return WriteReport(report);
+  const SymbolsFor symbols([&symbolsFor](uint32_t pid) -> SymbolSource& { return symbolsFor(pid); });
+  const Report report = BuildReport(g_analysis, symbols, opt, ProgramThreadLabel);
+  const int code = WriteReport(report);
+  const int exported = WriteExports(g_analysis, symbols, ProgramThreadLabel, ticksPerSecond, report.program);
+  return code != kExitOk ? code : exported;
 }
 
 // Rebuilds the report from a version 2 dump (W18, W19), with no kernel trace and without the
@@ -1242,10 +1275,12 @@ int ReportFromDump(const std::wstring& path, ReportOptions opt) {
     return it != info.threadNames.end() ? it->second : "Thread " + std::to_string(tid);
   };
   if (!g_output.json) std::printf("Report rebuilt from %s.\n", Narrow(path).c_str());
-  return WriteReport(BuildReport(an, SymbolsFor(std::ref(sym)), opt, name));
+  const SymbolsFor symbols(std::ref(sym));
+  const Report report = BuildReport(an, symbols, opt, name);
+  const int code = WriteReport(report);
+  const int exported = WriteExports(an, symbols, name, opt.ticksPerSecond, report.program);
+  return code != kExitOk ? code : exported;
 }
-
-constexpr char kVersion[] = "0.9.0";
 
 void Usage() {
   std::printf(
@@ -1280,6 +1315,11 @@ void Usage() {
       "  --format text|json   the report as text (default) or as JSON; the JSON layout is\n"
       "                       docs/report-schema.json\n"
       "  --out FILE           write the report to FILE instead of the console\n"
+      "  --export-chrome FILE\n"
+      "                       also write each thread's timeline as a Chrome trace, for\n"
+      "                       ui.perfetto.dev or chrome://tracing\n"
+      "  --export-speedscope FILE\n"
+      "                       also write it as a speedscope profile (speedscope.app)\n"
       "  --top N              show the N biggest groups of waits (default 6)\n"
       "  --min-ms N           hide groups smaller than N milliseconds (default 10)\n"
       "  --stall-ms N         report any single lock, disk, network or page-fault wait of\n"
@@ -1406,7 +1446,7 @@ int wmain(int argc, wchar_t** argv) {
     const bool takesValue = a == L"--pid" || a == L"--name" || a == L"--seconds" || a == L"--top" ||
                             a == L"--min-ms" || a == L"--stall-ms" || a == L"--dump-events" ||
                             a == L"--symbols" || a == L"--from-dump" || a == L"--format" ||
-                            a == L"--out";
+                            a == L"--out" || a == L"--export-chrome" || a == L"--export-speedscope";
     if (!takesValue) {
       if (a == L"--help" || a == L"-h") {
         Usage();
@@ -1457,6 +1497,10 @@ int wmain(int argc, wchar_t** argv) {
       g_output.json = format == L"json";
     } else if (a == L"--out") {
       g_output.file = value;
+    } else if (a == L"--export-chrome") {
+      g_output.chromeFile = value;
+    } else if (a == L"--export-speedscope") {
+      g_output.speedscopeFile = value;
     }
   }
   KeepConsoleForJson();

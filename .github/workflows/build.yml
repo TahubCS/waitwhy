@@ -79,6 +79,15 @@ jobs:
           $got = ($out.Substring($out.IndexOf('=====')) -replace "`r", '').TrimEnd()
           $want = ((Get-Content tests\golden\slowapp-lock.report.txt -Raw) -replace "`r", '').Trim()
           if ($got -ne $want) { Write-Host $out; throw "analyze does not print the golden report" }
+          # W37: the exports are JSON in the layout each viewer reads.
+          .\waitwhy.exe analyze tests\golden\slowapp-lock.events.txt --export-chrome golden-chrome.json --export-speedscope golden-speedscope.json | Out-Host
+          if ($LASTEXITCODE -ne 0) { throw "analyze with --export-chrome and --export-speedscope failed" }
+          $chrome = Get-Content golden-chrome.json -Raw | ConvertFrom-Json
+          if (-not ($chrome.traceEvents | Where-Object { $_.ph -eq 'X' -and $_.tid -eq 1 -and $_.name -like 'lock in *update_frame' })) {
+            throw "the Chrome trace has no lock wait of main in update_frame"
+          }
+          $speedscope = Get-Content golden-speedscope.json -Raw | ConvertFrom-Json
+          if ($speedscope.profiles.Count -lt 3 -or $speedscope.shared.frames.Count -lt 1) { throw "the speedscope profile is missing threads or frames" }
 
       # C8 smoke test: waitwhy must report the lock bug in buggy slowapp and nothing in fixed
       # slowapp. GitHub's Windows runners run as Administrator, which kernel tracing needs.
@@ -153,6 +162,17 @@ jobs:
           if ($json.schema -ne 'waitwhy-report/1' -or
               -not ($json.findings | Where-Object { $_.category -eq 'lock' -and $_.yourCode -match 'update_frame' -and $_.chain.waker -match 'saver' })) {
             $failures += 'JSON report: no lock finding in update_frame with a chain to saver.'
+          }
+
+          # W37: a real run's timeline as a Chrome trace and a speedscope profile.
+          & .\waitwhy.exe analyze buggy-events.txt --export-chrome buggy-chrome.json --export-speedscope buggy-speedscope.json | Out-Null
+          $chrome = Get-Content buggy-chrome.json -Raw | ConvertFrom-Json
+          if (-not ($chrome.traceEvents | Where-Object { $_.ph -eq 'X' -and $_.name -like 'lock in *update_frame' })) {
+            $failures += 'Chrome trace: no lock wait in update_frame in the buggy run.'
+          }
+          $speedscope = Get-Content buggy-speedscope.json -Raw | ConvertFrom-Json
+          if (-not ($speedscope.shared.frames | Where-Object { $_.name -like '*update_frame*' })) {
+            $failures += 'speedscope profile: no update_frame frame in the buggy run.'
           }
 
           # W35: diff as a CI gate. Going from the fixed to the buggy slowapp must fail it.
@@ -273,6 +293,8 @@ jobs:
             symbols-report.txt
             launch-events.txt
             launch-report.txt
+            buggy-chrome.json
+            buggy-speedscope.json
           if-no-files-found: ignore
 
   # The analysis core (analysis.h) makes no Windows calls (D7), so its tests also run here, with

@@ -12,7 +12,9 @@
 #include <fstream>
 #include <sstream>
 
+#include "../diff.h"
 #include "../dump.h"
+#include "../export.h"
 #include "../report.h"
 #include "check.h"
 
@@ -48,6 +50,87 @@ Report ReportFromDump(const std::vector<DumpLine>& lines) {
     return it != info.threadNames.end() ? it->second : "Thread " + std::to_string(tid);
   };
   return BuildReport(an, SymbolsFor(std::ref(sym)), opt, name);
+}
+
+// W37: the exports of the same dump are valid JSON, in the layout each viewer reads, and show
+// main's lock wait where the report does.
+void CheckExports(const std::vector<DumpLine>& lines) {
+  Analyzer an;
+  DumpReplay replay(an);
+  const DumpInfo info = replay.Run(lines);
+  DumpSymbolsByProcess sym(lines);
+  const SymbolsFor symbols(std::ref(sym));
+  auto name = [&info](uint32_t tid) {
+    auto it = info.threadNames.find(tid);
+    return it != info.threadNames.end() ? it->second : "Thread " + std::to_string(tid);
+  };
+  auto expect = [](const char* what, bool ok) {
+    std::printf("  %s %s\n", ok ? "ok  " : "FAIL", what);
+    if (!ok) ++Failures();
+  };
+  const std::string lockWait = "lock in slowapp!`anonymous namespace'::update_frame";
+  const double windowUs = static_cast<double>(an.lastTs - an.firstTs) * 1e6 / info.ticksPerSecond;
+
+  JsonValue chrome;
+  std::string error;
+  expect("Chrome trace is JSON", JsonReader(ExportChromeTrace(an, symbols, name, info.ticksPerSecond, "slowapp.exe"))
+                                     .Read(&chrome, &error));
+  const JsonValue* events = chrome.Get("traceEvents");
+  bool mainNamed = false, lockFound = false, slicesInWindow = true;
+  std::map<double, double> busyUs;  // tid -> sum of its slices
+  if (events)
+    for (const JsonValue& e : events->items) {
+      const std::string ph = e.Str("ph");
+      if (ph == "M" && e.Str("name") == "thread_name" && e.Get("args") && e.Get("args")->Str("name") == "Thread 1 (main)")
+        mainNamed = true;
+      if (ph != "X") continue;
+      const double ts = e.Num("ts"), dur = e.Num("dur");
+      if (ts < 0 || dur < 0 || ts + dur > windowUs + 1) slicesInWindow = false;
+      busyUs[e.Num("tid")] += dur;
+      if (e.Num("tid") == 1 && e.Str("name") == lockWait && std::fabs(dur - 3.01e6) < 1e4) lockFound = true;
+    }
+  expect("Chrome trace names main's thread", mainNamed);
+  expect("Chrome trace shows main's 3.01 s lock wait", lockFound);
+  expect("Chrome slices lie in the window", slicesInWindow);
+  bool noThreadOverfull = !busyUs.empty();
+  for (const auto& [tid, us] : busyUs) noThreadOverfull = noThreadOverfull && us <= windowUs + 1;
+  expect("no thread has more slices than the window", noThreadOverfull);
+
+  JsonValue speedscope;
+  expect("speedscope profile is JSON",
+         JsonReader(ExportSpeedscope(an, symbols, name, info.ticksPerSecond, "slowapp.exe", "test")).Read(&speedscope, &error));
+  const JsonValue* shared = speedscope.Get("shared");
+  const JsonValue* frames = shared ? shared->Get("frames") : nullptr;
+  const JsonValue* profiles = speedscope.Get("profiles");
+  bool lockFrame = false;
+  if (frames)
+    for (const JsonValue& f : frames->items) lockFrame = lockFrame || f.Str("name") == "[" + lockWait + "]";
+  expect("speedscope has main's lock wait as a frame", lockFrame);
+  bool balanced = profiles && !profiles->items.empty();
+  if (profiles)
+    for (const JsonValue& p : profiles->items) {
+      const JsonValue* list = p.Get("events");
+      if (!list || p.Str("type") != "evented") {
+        balanced = false;
+        continue;
+      }
+      std::vector<double> open;
+      double at = 0;
+      for (const JsonValue& e : list->items) {
+        if (e.Num("at") < at) balanced = false;
+        at = e.Num("at");
+        if (e.Str("type") == "O") {
+          open.push_back(e.Num("frame"));
+        } else if (open.empty() || open.back() != e.Num("frame")) {
+          balanced = false;
+        } else {
+          open.pop_back();
+        }
+        if (frames && e.Num("frame") >= static_cast<double>(frames->items.size())) balanced = false;
+      }
+      if (!open.empty() || at > p.Num("endValue")) balanced = false;
+    }
+  expect("speedscope events nest, in time order, within each profile", balanced);
 }
 
 // Prints the first line where the two texts differ.
@@ -101,6 +184,7 @@ int main(int argc, char** argv) {
         ShowFirstDifference(gotJson, wantJson);
       }
     }
+    CheckExports(lines);
   }
   std::printf(Failures() ? "%d check(s) failed.\n" : "All checks passed.\n", Failures());
   return Failures() ? 1 : 0;
