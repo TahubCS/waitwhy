@@ -225,3 +225,5 @@ Newest line last. Format: `YYYY-MM-DD  ID  status  note`.
 - 2026-10-16  W18  started  Dump version 2 written by waitwhy.cpp; dump.h reads versions 1 and 2 and replays them; CI keeps the smoke runs' dumps and reports as the smoke-dumps artifact.
 - 2026-10-16  W18  confirmed  CI run #64: version 1 replay unchanged, version 2 replay checks pass, smoke-dumps artifact kept.
 - 2026-10-16  W19  started  report.h builds the report as data and renders the text; --from-dump FILE rebuilds it from a version 2 dump. Golden test tests/golden/slowapp-lock; CI checks that each smoke run's rebuilt report equals its live report.
+- 2026-10-16  W19  confirmed  CI run #65: golden report matches; each smoke run's report rebuilt from its dump equals the live report.
+- 2026-10-16  W20  started  Window from QPC before the trace reader starts to QPC before the session stops; earlier events clamped to the window; thread shares are of each thread's lifetime in the window.

@@ -207,6 +207,47 @@ void CheckReadySplitsWaitTime() {
   ExpectEq("lock released by", waker, 200);
 }
 
+// W20: the window starts when tracing starts. An event logged earlier still sets the thread's
+// state, but no time before the window counts; a thread created or ended inside the window is
+// measured against its own lifetime.
+void CheckWindowAndLifetime() {
+  std::printf("Exact window and thread lifetimes (W20)\n");
+  Analyzer an;
+  an.pid = 1;
+  an.firstTs = 1000;
+  an.targetThreads = {5};
+  SwitchEvent e;
+  e.ts = 900;  // before the window: thread 5 goes to sleep
+  e.oldTid = 5;
+  e.newTid = 0;
+  e.oldState = kThreadStateWaiting;
+  e.oldWaitReason = 4;
+  an.OnSwitch(e);
+  e = SwitchEvent{};
+  e.ts = 1500;  // and wakes up
+  e.oldTid = 0;
+  e.newTid = 5;
+  an.OnSwitch(e);
+  ThreadEvent t;
+  t.ts = 1200;
+  t.pid = 1;
+  t.tid = 6;
+  t.kind = ThreadEvent::Kind::Created;
+  an.OnThread(t);
+  t.ts = 1700;
+  t.tid = 5;
+  t.kind = ThreadEvent::Kind::Ended;
+  an.OnThread(t);
+  an.lastTs = 2000;
+  an.FlushAtEnd();
+  ExpectEq("window start kept", an.firstTs, 1000);
+  ExpectEq("sleep counted from the window start", an.threads.at(5).waitTicks, 500);
+  ExpectEq("running until it ended", an.threads.at(5).runTicks, 200);
+  ExpectEq("lifetime of the thread that ended", an.Lifetime(5), 700);
+  ExpectEq("lifetime of the thread created during the trace", an.Lifetime(6), 800);
+  ExpectEq("lifetime of a thread never seen is the window", an.Lifetime(99), 1000);
+}
+
 }  // namespace
 
 int main() {
@@ -219,6 +260,7 @@ int main() {
   CheckRuntimeFrames();
   CheckTopWakerAndDuration();
   CheckReadySplitsWaitTime();
+  CheckWindowAndLifetime();
   std::printf(Failures() ? "%d check(s) failed.\n" : "All checks passed.\n", Failures());
   return Failures() ? 1 : 0;
 }

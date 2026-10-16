@@ -162,11 +162,6 @@ void OnCSwitch(const EVENT_RECORD* ev, uint64_t ts) {
     ++g_dumpLines;
   }
 
-  if (g_dump && g_analysis.firstTs == 0) {
-    std::fprintf(g_dump, "WINDOW ts=%llu\n", static_cast<unsigned long long>(ts));
-    ++g_dumpLines;
-  }
-
   SwitchEvent e;
   e.ts = ts;
   e.oldTid = c.oldThreadId;
@@ -739,6 +734,16 @@ int wmain(int argc, wchar_t** argv) {
     StopKernelSession();
     return kExitTraceUnavailable;
   }
+  // The window starts now, before the first event is read, so the reader thread never sees it
+  // change (W20). Events Windows logged since the session started still set each thread's
+  // state; their time counts from here.
+  LARGE_INTEGER windowStart;
+  QueryPerformanceCounter(&windowStart);
+  g_analysis.firstTs = static_cast<uint64_t>(windowStart.QuadPart);
+  if (g_dump) {
+    std::fprintf(g_dump, "WINDOW ts=%llu\n", static_cast<unsigned long long>(g_analysis.firstTs));
+    ++g_dumpLines;
+  }
   std::thread reader([&consumer] { ProcessTrace(&consumer, 1, nullptr, nullptr); });
 
   std::printf("Watching PID %u (%zu threads) for %d seconds", pid, g_analysis.targetThreads.size(),
@@ -756,9 +761,12 @@ int wmain(int argc, wchar_t** argv) {
   }
   std::printf("\n");
 
+  LARGE_INTEGER windowEnd;
+  QueryPerformanceCounter(&windowEnd);
   SessionProps stopped;
   StopKernelSession(&stopped);  // ProcessTrace returns once the buffers are drained
   reader.join();
+  g_analysis.lastTs = static_cast<uint64_t>(windowEnd.QuadPart);
   CloseTrace(consumer);
   CloseHandle(target);
   if (g_dump) {
@@ -768,7 +776,7 @@ int wmain(int argc, wchar_t** argv) {
                  stopped.props.EventsLost, stopped.props.RealTimeBuffersLost);
   }
 
-  if (g_analysis.firstTs != 0) SnapshotThreadsStillBlocked();
+  SnapshotThreadsStillBlocked();
   g_analysis.FlushAtEnd();
   Symbolizer sym;
   const bool symbolsOk = sym.Init(pid);

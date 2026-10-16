@@ -112,6 +112,10 @@ struct ThreadState {
   uint64_t waitTicks = 0;
   uint64_t readyTicks = 0;
   bool seen = false;
+  // The part of the window the thread existed in (W20): from its creation, if that was during
+  // the trace, to its end, if it ended. 0 means the window's own start or end.
+  uint64_t bornAt = 0;
+  uint64_t endedAt = 0;
 };
 
 // All waits of one thread that share the same call stack and wait reason.
@@ -153,6 +157,9 @@ class Analyzer {
   std::unordered_set<uint32_t> exitedThreads;  // the program's threads that ended while traced
   std::unordered_map<uint32_t, ThreadState> threads;
   std::map<std::pair<uint32_t, uint64_t>, Bucket> buckets;
+  // The observation window. waitwhy.cpp sets firstTs to the moment tracing starts, before any
+  // event arrives, and lastTs to the moment it stops (W20). Without that (old dumps, tests)
+  // they are the first and last context switch.
   uint64_t firstTs = 0;
   uint64_t lastTs = 0;
 
@@ -166,10 +173,23 @@ class Analyzer {
     return targetThreads.count(tid) != 0 || exitedThreads.count(tid) != 0;
   }
 
+  // An event logged before the window started still says what state a thread is in, but its
+  // time counts from the start of the window.
+  uint64_t InWindow(uint64_t ts) const { return (std::max)(ts, firstTs); }
+
+  // The time thread `tid` existed inside the window, in ticks.
+  uint64_t Lifetime(uint32_t tid) const {
+    auto it = threads.find(tid);
+    const uint64_t from = it != threads.end() && it->second.bornAt ? it->second.bornAt : firstTs;
+    const uint64_t to = it != threads.end() && it->second.endedAt ? it->second.endedAt : lastTs;
+    return to > from ? to - from : 0;
+  }
+
   void OnSwitch(const SwitchEvent& e) {
     if (firstTs == 0) firstTs = e.ts;
     lastTs = e.ts;
     ++contextSwitches;
+    const uint64_t ts = InWindow(e.ts);
 
     // A thread of the target process leaves the CPU.
     if (IsTarget(e.oldTid)) {
@@ -180,14 +200,14 @@ class Analyzer {
       }
       st.seen = true;
       if (st.running) {
-        st.runTicks += e.ts - st.runStart;
+        st.runTicks += ts - st.runStart;
         st.running = false;
       }
       // An exited thread never comes back, so there is no off-CPU period to open.
       if (e.oldState != kThreadStateTerminated) {
         // Earlier waits still awaiting their stack stay in `awaitingStack`, separate from this.
         st.open = OffCpu{};
-        st.open.start = e.ts;
+        st.open.start = ts;
         st.open.reason = e.oldWaitReason;
         st.open.isWait = (e.oldState == kThreadStateWaiting);
         st.offCpu = true;
@@ -197,17 +217,17 @@ class Analyzer {
     // A thread of the target process gets back on a CPU.
     if (IsTarget(e.newTid)) {
       ThreadState& st = threads[e.newTid];
-      OpenPeriodFromWindowStart(st, e.ts);
+      OpenPeriodFromWindowStart(st, ts);
       st.seen = true;
       if (st.offCpu) {
-        st.open.end = e.ts;
+        st.open.end = ts;
         st.offCpu = false;
         if (!st.open.isWait || !stacksOn) {
           Record(e.newTid, st, st.open, false);  // no stack needed, or none will come
         } else {
           // Its user-mode stack is logged after this event, possibly much later: either for
           // this switch-in, or for an earlier one when the thread has not been back in user
-          // mode since (W14). OnStack finds it by timestamp either way.
+          // mode since (W14). OnStack finds it by the event's own timestamp either way.
           st.awaitingStack.emplace(e.ts, std::move(st.open));
           if (st.awaitingStack.size() > kMaxWaitsAwaitingStack) {
             auto oldest = st.awaitingStack.begin();
@@ -217,16 +237,17 @@ class Analyzer {
         }
       }
       st.running = true;
-      st.runStart = e.ts;
+      st.runStart = ts;
     }
   }
 
   void OnReady(const ReadyEvent& e) {
     if (!IsTarget(e.readiedTid)) return;
     ThreadState& st = threads[e.readiedTid];
-    OpenPeriodFromWindowStart(st, e.ts);
+    const uint64_t ts = InWindow(e.ts);
+    OpenPeriodFromWindowStart(st, ts);
     if (!st.offCpu) return;
-    if (st.open.readyAt == 0) st.open.readyAt = e.ts;
+    if (st.open.readyAt == 0) st.open.readyAt = ts;
     st.open.wokenBy = e.byTid;
   }
 
@@ -240,7 +261,12 @@ class Analyzer {
     exitedThreads.erase(e.tid);
     // A new thread was not blocked or running before the trace, so the window-start periods
     // (W6) do not apply to it. A reused thread ID keeps adding to the same totals.
-    if (e.kind == ThreadEvent::Kind::Created) threads[e.tid].seen = true;
+    if (e.kind == ThreadEvent::Kind::Created) {
+      ThreadState& st = threads[e.tid];
+      st.seen = true;
+      st.bornAt = InWindow(e.ts);
+      st.endedAt = 0;
+    }
   }
 
   void OnStack(const StackEvent& e) {
@@ -358,8 +384,10 @@ class Analyzer {
   void OnThreadEnd(const ThreadEvent& e) {
     if (!IsTarget(e.tid)) return;
     ThreadState& st = threads[e.tid];
-    if (st.running && e.ts > st.runStart) st.runTicks += e.ts - st.runStart;
+    const uint64_t ts = InWindow(e.ts);
+    if (st.running && ts > st.runStart) st.runTicks += ts - st.runStart;
     st.running = false;
+    st.endedAt = ts;
     for (auto& entry : st.awaitingStack) RecordWithoutStack(e.tid, st, entry.second);
     st.awaitingStack.clear();
     st.offCpu = false;

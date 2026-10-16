@@ -10,12 +10,12 @@
 //
 //   DUMP       version pid ticksPerSecond          first line
 //   TARGET     tid                                 threads of the program when tracing starts
-//   WINDOW     ts                                  first context switch of the trace (any thread)
+//   WINDOW     ts                                  start of the window: tracing started (W20)
 //   CSWITCH    ts cpu old new oldState oldReason
 //   READY      ts cpu readied headerThread flag by  `by`: the waker as waitwhy resolved it
 //   STACK      ts eventTs tid kernelFrames userFrames firstUser frames=0x..,0x..
 //   THREAD     ts kind pid tid                     kind: 0 created, 1 existing, 2 ended
-//   END        ts contextSwitches stacksOn eventsLost buffersLost   tracing stopped
+//   END        ts contextSwitches stacksOn eventsLost buffersLost   tracing stopped: end of window
 //   SNAPSHOT   tid frames=0x..,0x..                stack of a thread still blocked (W7)
 //   NAMES      symbolsOk                           the program could be opened for names
 //   EXE        name=<file name of the program>

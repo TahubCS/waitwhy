@@ -100,7 +100,12 @@ inline Report BuildReport(const Analyzer& an, SymbolSource& sym, const ReportOpt
                             ? static_cast<double>(an.lastTs - an.firstTs) / opt.ticksPerSecond
                             : 0.0;
   auto secs = [&](uint64_t ticks) { return static_cast<double>(ticks) / opt.ticksPerSecond; };
-  auto pct = [&](uint64_t ticks) { return window > 0 ? 100.0 * secs(ticks) / window : 0.0; };
+  // Shares are of the thread's own time in the window (W20): a thread that started or ended
+  // during the trace is not measured against time it did not exist.
+  auto pct = [&](uint32_t tid, uint64_t ticks) {
+    const uint64_t life = an.Lifetime(tid);
+    return life > 0 ? 100.0 * static_cast<double>(ticks) / static_cast<double>(life) : 0.0;
+  };
 
   r.program = opt.exeFile.empty() ? "process" : opt.exeFile;
   r.pid = an.pid;
@@ -136,9 +141,9 @@ inline Report BuildReport(const Analyzer& an, SymbolSource& sym, const ReportOpt
     ThreadRow row;
     row.tid = tid;
     row.label = name(tid);
-    row.runningPct = pct(st.runTicks);
-    row.waitingPct = pct(st.waitTicks);
-    row.readyPct = pct(st.readyTicks);
+    row.runningPct = pct(tid, st.runTicks);
+    row.waitingPct = pct(tid, st.waitTicks);
+    row.readyPct = pct(tid, st.readyTicks);
     r.threads.push_back(row);
   }
 
@@ -156,7 +161,7 @@ inline Report BuildReport(const Analyzer& an, SymbolSource& sym, const ReportOpt
     w.tid = b.tid;
     w.thread = name(b.tid);
     w.seconds = secs(b.ticks);
-    w.pct = pct(b.ticks);
+    w.pct = pct(b.tid, b.ticks);
     w.count = b.count;
     w.stillWaitingAtEnd = b.stillWaitingAtEnd;
     w.category = category[&b];
@@ -172,11 +177,11 @@ inline Report BuildReport(const Analyzer& an, SymbolSource& sym, const ReportOpt
     for (const Bucket* b : buckets) {
       if (b->tid != tid) continue;
       const Category c = category[b];
-      if (c == Category::Sleep || pct(b->ticks) < 10.0) continue;
+      if (c == Category::Sleep || pct(tid, b->ticks) < 10.0) continue;
       Finding f;
       f.tid = tid;
       f.thread = name(tid);
-      f.pct = pct(b->ticks);
+      f.pct = pct(tid, b->ticks);
       f.category = c;
       f.yourCode = YourCodeFrame(*b, sym);
       const uint32_t waker = TopWaker(*b);
@@ -197,12 +202,12 @@ inline Report BuildReport(const Analyzer& an, SymbolSource& sym, const ReportOpt
       r.findings.push_back(f);
     }
     const ThreadState& st = an.threads.at(tid);
-    if (pct(st.readyTicks) >= 20.0) {
+    if (pct(tid, st.readyTicks) >= 20.0) {
       Finding f;
       f.kind = Finding::Kind::CpuCompetition;
       f.tid = tid;
       f.thread = name(tid);
-      f.pct = pct(st.readyTicks);
+      f.pct = pct(tid, st.readyTicks);
       r.findings.push_back(f);
     }
   }
