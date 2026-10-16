@@ -132,6 +132,8 @@ jobs:
           $fixed = Watch-Slowapp 'fixed' @('--fixed')
           # W26: slowapp exits about 3 s into the 8 s watch; names must come from the trace.
           $exited = Watch-Slowapp 'exited' @('--seconds', '6')
+          # W45: without stack snapshots the lock finding still stands, and the report says so.
+          $nosuspend = Watch-Slowapp 'nosuspend' @() @('--no-suspend')
           # W32: launch mode: waitwhy starts slowapp itself and watches it from the start until it exits.
           $launch = & .\waitwhy.exe --seconds 12 --dump-events launch-events.txt -- .\slowapp.exe --seconds 6 --mb 64 2>&1 | Out-String
           Set-Content -Path launch-report.txt -Value $launch -Encoding utf8
@@ -253,6 +255,10 @@ jobs:
           if ($launch -notmatch 'Started .*slowapp' -or $launch -notmatch '\(main(, exited)?\) spent \d+% of the time waiting for a lock that another thread was holding, in slowapp!.*update_frame\.') {
             $failures += 'Launch run: slowapp was not started and watched, or its lock wait was not found.'
           }
+          if ($nosuspend -notmatch '\(main\) spent \d+% of the time waiting for a lock that another thread was holding, in slowapp!.*update_frame\.' -or
+              $nosuspend -notmatch 'Stack snapshots  : not taken') {
+            $failures += 'No-suspend run: no lock finding in update_frame, or no note that stack snapshots were not taken.'
+          }
           if ($recordCode -ne 0 -or -not (Test-Path buggy.etl) -or -not (Test-Path buggy.etl.waitwhy)) {
             $failures += "Record run: waitwhy record exited with $recordCode or wrote no buggy.etl and buggy.etl.waitwhy."
           }
@@ -281,7 +287,7 @@ jobs:
           }
           foreach ($run in @(@{ Label = 'buggy'; Live = $buggy }, @{ Label = 'fixed'; Live = $fixed },
                              @{ Label = 'exited'; Live = $exited }, @{ Label = 'symbols'; Live = $symbols },
-                             @{ Label = 'launch'; Live = $launch })) {
+                             @{ Label = 'launch'; Live = $launch }, @{ Label = 'nosuspend'; Live = $nosuspend })) {
             if (-not $run.Live) { continue }
             $offline = & .\waitwhy.exe --from-dump "$($run.Label)-events.txt" 2>&1 | Out-String
             if ($LASTEXITCODE -ne 0 -or (Get-ReportPart $offline) -ne (Get-ReportPart $run.Live)) {

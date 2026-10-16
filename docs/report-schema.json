@@ -130,7 +130,8 @@
             "none": { "type": "array", "items": { "type": "string" } }
           }
         },
-        "pdbNotUsed": { "type": "string", "description": "A .pdb beside the program that does not match it; empty if none." }
+        "pdbNotUsed": { "type": "string", "description": "A .pdb beside the program that does not match it; empty if none." },
+        "stackSnapshots": { "type": "boolean", "description": "Threads blocked the whole window got one stack snapshot (false with --no-suspend and for .etl traces). Added in W45." }
       }
     },
     "counters": {

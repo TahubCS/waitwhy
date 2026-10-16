@@ -44,6 +44,7 @@ Report ReportFromDump(const std::vector<DumpLine>& lines) {
   opt.eventsLost = info.eventsLost;
   opt.buffersLost = info.buffersLost;
   opt.stacksOn = info.stacksOn;
+  opt.snapshotsOn = info.snapshotsOn;
   opt.symbolsOk = info.symbolsOk;
   opt.exeFile = info.exeFile;
   auto name = [&info](uint32_t tid) {

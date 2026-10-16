@@ -220,7 +220,8 @@
       ],
       "none": []
     },
-    "pdbNotUsed": ""
+    "pdbNotUsed": "",
+    "stackSnapshots": true
   },
   "counters": {
     "contextSwitches": 12345,

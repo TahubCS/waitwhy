@@ -123,6 +123,9 @@ How far to trust the report:
 | medium | Under 95% of the wait time has a call stack; some events lost; or the waker of over 10% of the finished wait time is unknown |
 | high | None of the above |
 
+"Stack snapshots: not taken" appears with `--no-suspend` and for `.etl` traces: a thread that was
+blocked for the whole window then shows no location in your code.
+
 **Function names** says which modules had full names (from a `.pdb`) and which only exported
 names. With exported names only, a function that is not exported shows as the nearest exported
 one, so a name in Windows' own DLLs can be wrong; `--symbols ms` downloads their real symbols.

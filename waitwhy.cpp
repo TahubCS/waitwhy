@@ -208,6 +208,8 @@ std::vector<uint32_t> g_cpuThread(256, kUnknownThread);  // thread currently on 
 // Reading a recorded .etl file (W38): nothing may be asked of the live system, whose processes
 // and threads may be others with the same IDs.
 bool g_fromTraceFile = false;
+// --no-suspend (W45, D13): no stack snapshots, which pause the program's threads for a moment.
+bool g_noSuspend = false;
 std::atomic<bool> g_stopRequested{false};
 // End of the observation window, set by the main thread when it stops watching; 0 until then
 // (W20). Events stamped later are still delivered until the session stops; they are not counted.
@@ -1370,6 +1372,8 @@ int PrintReport(double ticksPerSecond, ReportOptions opt, const SessionProps& st
   opt.eventsLost = stopped.props.EventsLost;
   opt.buffersLost = stopped.props.RealTimeBuffersLost;
   opt.stacksOn = stacksOn;
+  // Stack snapshots (W45, D13): watch takes them unless --no-suspend; a trace file has none.
+  opt.snapshotsOn = !g_noSuspend && !g_fromTraceFile;
   opt.symbolsOk = symbolsOk;
   opt.exeFile = sym.ExeFile();
   // A recorded trace is always named from its modules (W38); that is no news there.
@@ -1402,6 +1406,7 @@ int ReportFromDump(const std::wstring& path, ReportOptions opt) {
   opt.eventsLost = info.eventsLost;
   opt.buffersLost = info.buffersLost;
   opt.stacksOn = info.stacksOn;
+  opt.snapshotsOn = info.snapshotsOn;
   opt.symbolsOk = info.symbolsOk;
   opt.exeFile = info.exeFile;
   opt.namesFromTrace = info.namesFromTrace;
@@ -1646,6 +1651,8 @@ void Usage() {
       "  --seconds N          how long to watch (default 10)\n"
       "  --children           also watch the processes the program starts\n"
       "  --all                with --name: watch every process of that name\n"
+      "  --no-suspend         take no stack snapshot of threads blocked the whole window\n"
+      "                       (each pauses that thread for a moment); record never does\n"
       "  --dump-events FILE   also write every event of the program to FILE, and the names\n"
       "                       the report uses; attach it to bug reports\n"
       "  --symbols ms|PATH    ms: download Windows' own symbols from Microsoft (cached in\n"
@@ -1813,6 +1820,10 @@ int wmain(int argc, wchar_t** argv) {
       }
       if (a == L"--children") {
         g_followChildren = true;
+        continue;
+      }
+      if (a == L"--no-suspend") {
+        g_noSuspend = true;
         continue;
       }
       if (a == L"--all") {
@@ -2156,13 +2167,13 @@ int wmain(int argc, wchar_t** argv) {
     return kExitOk;
   }
   if (g_dump) {
-    std::fprintf(g_dump, "END ts=%llu contextSwitches=%llu stacksOn=%d eventsLost=%lu buffersLost=%lu\n",
+    std::fprintf(g_dump, "END ts=%llu contextSwitches=%llu stacksOn=%d eventsLost=%lu buffersLost=%lu%s\n",
                  static_cast<unsigned long long>(g_analysis.lastTs),
                  static_cast<unsigned long long>(g_analysis.contextSwitches), stacksOn ? 1 : 0,
-                 stopped.props.EventsLost, stopped.props.RealTimeBuffersLost);
+                 stopped.props.EventsLost, stopped.props.RealTimeBuffersLost, g_noSuspend ? " snapshots=0" : "");
   }
 
-  SnapshotThreadsStillBlocked();
+  if (!g_noSuspend) SnapshotThreadsStillBlocked();
   g_analysis.FlushAtEnd();
   // A program that exited can no longer be asked for its modules; the trace recorded them.
   NameWakerProcesses();

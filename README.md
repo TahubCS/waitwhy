@@ -238,7 +238,7 @@ The analysis and the report (`analysis.h`, `report.h`, `html.h`, `export.h`, `di
 |---|---|
 | Needs Administrator | Kernel tracing is a privileged feature |
 | Uses a private kernel trace session (`waitwhy-<pid>`) | Other tools' "NT Kernel Logger" sessions keep running. Only where Windows cannot give a private session does waitwhy fall back to "NT Kernel Logger", stopping another tool's session there first and printing a note. A session left behind by a waitwhy that was killed is stopped on the next run |
-| A thread blocked for the whole window never switches, so it produces no events | Its location comes from one snapshot of its stack, taken when the trace ends (the thread is paused for the moment that takes); its wait reason is shown as "not known" |
+| A thread blocked for the whole window never switches, so it produces no events | Its location comes from one snapshot of its stack, taken when the trace ends (the thread is paused for the moment that takes; `--no-suspend` turns this off, and `record` never does it); its wait reason is shown as "not known" |
 | Wake-ups from hardware interrupts (a disk or network card finishing) | Shown as "the system" or "outside your program" instead of a specific cause |
 | Very busy machines generate huge numbers of events | Windows may drop some; waitwhy prints a warning when it does |
 | Category labels come from the file object, the waking thread and function-name keywords | Waits in unusual libraries without file I/O can end up labeled "something else" |

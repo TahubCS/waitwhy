@@ -33,6 +33,7 @@ struct ReportOptions {
   std::string exeFile;    // the program's file name; empty when unknown
   bool namesFromTrace = false;  // the program had exited; names from its recorded modules (W26)
   std::string pdbNextToExe;     // a .pdb with the program's name beside it, if any (W26)
+  bool snapshotsOn = true;  // threads blocked the whole window got one stack snapshot (W45)
 };
 
 // The label of one of the program's threads, e.g. "Thread 37808 (main)".
@@ -113,6 +114,7 @@ struct DataQuality {
   bool modulesKnown = false;  // the symbol status was recorded
   bool programNamed = true;   // the program's own module has a .pdb (or it is not known)
   std::string pdbNextToExe;   // set when a .pdb lies beside the program but was not used
+  bool snapshotsOn = true;    // stack snapshots of threads blocked the whole window (W45)
 };
 
 inline const char* LevelName(DataQuality::Level l) {
@@ -472,6 +474,7 @@ inline Report BuildReport(const Analyzer& an, const SymbolsFor& symbolsFor, cons
   // code has no .pdb; medium when under 95% of the wait time has a stack, when any event was
   // lost, or when the waker of over 10% of the finished wait time is unknown.
   DataQuality& q = r.quality;
+  q.snapshotsOn = opt.snapshotsOn;
   q.eventsLost = opt.eventsLost;
   q.buffersLost = opt.buffersLost;
   uint64_t waitTicks = 0, stackTicks = 0;
@@ -630,6 +633,8 @@ inline std::string RenderQualityText(const Report& r) {
           static_cast<unsigned long long>(r.kernelOnlyFragments));
   if (q.wakerKnownPct >= 0)
     Appendf(out, "  Wakers known     : %.0f%% of the time in waits that ended\n", q.wakerKnownPct);
+  if (!q.snapshotsOn)
+    Appendf(out, "  Stack snapshots  : not taken; threads blocked the whole window show no code location\n");
   auto join = [](const std::vector<std::string>& names) {
     std::string text;
     for (size_t i = 0; i < names.size(); ++i) text += (i ? ", " : "") + names[i];
@@ -957,6 +962,7 @@ inline std::string RenderJson(const Report& r) {
   }
   j.Close('}');
   j.Str("pdbNotUsed", q.pdbNextToExe);
+  j.Bool("stackSnapshots", q.snapshotsOn);
   j.Close('}');
 
   j.Open('{', "counters");

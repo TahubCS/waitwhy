@@ -60,7 +60,8 @@ Sessions left behind by a waitwhy that was killed are stopped on the next run.
 Some security products block or slow down programs that start kernel trace sessions or read
 other processes' memory (waitwhy reads stacks of threads that stayed blocked the whole time).
 If waitwhy is blocked, or a report shows many lost events only on one machine, add an exception
-for `waitwhy.exe` or ask your administrator to. waitwhy changes nothing in the watched program:
+for `waitwhy.exe` or ask your administrator to. `--no-suspend` leaves out the stack snapshots,
+so waitwhy never pauses or reads the memory of the watched program. waitwhy changes nothing in the watched program:
 in launch mode it only starts it suspended and resumes it once the trace runs.
 
 ## "... has no call stacks" (analyze of an .etl file)

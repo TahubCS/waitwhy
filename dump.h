@@ -15,7 +15,8 @@
 //   READY      ts cpu readied headerThread flag by  `by`: the waker as waitwhy resolved it
 //   STACK      ts eventTs tid kernelFrames userFrames firstUser frames=0x..,0x..
 //   THREAD     ts kind pid tid                     kind: 0 created, 1 existing, 2 ended
-//   END        ts contextSwitches stacksOn eventsLost buffersLost   tracing stopped: end of window
+//   END        ts contextSwitches stacksOn eventsLost buffersLost [snapshots]   tracing stopped: end of window
+//              (snapshots=0: no stack snapshots were taken, --no-suspend, W45)
 //   SNAPSHOT   tid frames=0x..,0x..                stack of a thread still blocked (W7)
 //   NAMES      symbolsOk fromTrace                 names found; fromTrace: from the IMAGE lines (W26)
 //   PDB        file=<path>                         a .pdb beside the program (W26)
@@ -126,6 +127,7 @@ struct DumpInfo {
   double ticksPerSecond = 0;
   bool ended = false;  // an END line was read
   bool stacksOn = true;
+  bool snapshotsOn = true;  // END snapshots=0: --no-suspend (W45)
   bool symbolsOk = true;
   bool namesFromTrace = false;
   std::string pdbNextToExe;
@@ -216,6 +218,7 @@ class DumpReplay {
       } else if (l.kind == "END") {
         info.ended = true;
         info.stacksOn = l.Get("stacksOn", 1) != 0;
+        info.snapshotsOn = l.Get("snapshots", 1) != 0;
         info.eventsLost = l.Get("eventsLost");
         info.buffersLost = l.Get("buffersLost");
       } else if (l.kind == "NAMES") {
