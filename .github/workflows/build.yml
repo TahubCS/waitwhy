@@ -365,10 +365,10 @@ jobs:
       - name: Overhead (bench)
         shell: pwsh
         run: |
-          function Bench([string[]]$Waitwhy) {
+          function Bench([int]$WorkUs, [string[]]$Waitwhy) {
             $out = Join-Path $PWD ("bench-" + [guid]::NewGuid() + ".txt")
             $p = Start-Process -FilePath (Resolve-Path .\scenarios.exe) -PassThru -NoNewWindow -RedirectStandardOutput $out `
-              -ArgumentList @('--mode', 'bench', '--seconds', '10')
+              -ArgumentList @('--mode', 'bench', '--seconds', '10', '--work-us', "$WorkUs")
             $null = $p.Handle
             if ($Waitwhy) { & .\waitwhy.exe @Waitwhy --pid $p.Id --seconds 9 *> $null }
             $p.WaitForExit()
@@ -376,24 +376,21 @@ jobs:
             if ($text -notmatch '(\d+) hand-overs per second') { throw "bench printed: $text" }
             return [double]$Matches[1]
           }
-          $alone = Bench @()
-          $watched = Bench @('watch')
-          $recorded = Bench @('record', '--out', 'bench.etl')
-          $alone2 = Bench @()
-          $base = ($alone + $alone2) / 2
-          $rows = @(
-            @('alone (mean of 2 runs)', $base),
-            @('waitwhy watch', $watched),
-            @('waitwhy record', $recorded))
-          $summary = "| bench (worst case) | hand-overs/s | slowdown |`n|---|---|---|`n"
-          foreach ($r in $rows) {
-            $slow = if ($base -gt 0) { 100 * (1 - $r[1] / $base) } else { 0 }
-            $summary += "| $($r[0]) | $([math]::Round($r[1])) | $([math]::Round($slow))% |`n"
-            if ($r[0] -ne 'alone (mean of 2 runs)' -and $slow -gt 50) {
-              Write-Host "::warning::$($r[0]) slowed the bench by $([math]::Round($slow))% (over 50%)."
+          $summary = "| bench | hand-overs/s | context switches/s | slowdown |`n|---|---|---|---|`n"
+          # Worst case: no work between hand-overs. Typical: 50 us of work on each side first.
+          foreach ($case in @(@{ Name = 'worst case'; Work = 0 }, @{ Name = '50 us of work'; Work = 50 })) {
+            $alone = ((Bench $case.Work @()) + (Bench $case.Work @())) / 2
+            $rows = @(@('alone (mean of 2)', $alone),
+                      @('waitwhy watch', (Bench $case.Work @('watch'))),
+                      @('waitwhy record', (Bench $case.Work @('record', '--out', "bench-$($case.Work).etl"))))
+            foreach ($r in $rows) {
+              $slow = if ($alone -gt 0) { 100 * (1 - $r[1] / $alone) } else { 0 }
+              $summary += "| $($case.Name), $($r[0]) | $([math]::Round($r[1])) | $([math]::Round(2 * $r[1])) | $([math]::Round($slow))% |`n"
+              if ($case.Work -gt 0 -and $r[0] -ne 'alone (mean of 2)' -and $slow -gt 50) {
+                Write-Host "::warning::$($r[0]) slowed the bench with $($case.Work) us of work by $([math]::Round($slow))% (over 50%)."
+              }
             }
           }
-          $summary += "`nThe two runs alone: $([math]::Round($alone)) and $([math]::Round($alone2)) hand-overs/s.`n"
           Write-Host $summary
           $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 

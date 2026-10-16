@@ -23,6 +23,8 @@
 //   bench       (W43, for measuring waitwhy's overhead) pairs of threads hand a token back and
 //               forth as fast as they can, about the worst case for waitwhy: every hand-over
 //               is two context switches, each with a call stack. Prints hand-overs per second.
+//               --work-us N: each side computes N microseconds before it hands over, like a
+//               program that does some work between its waits.
 
 #ifndef UNICODE
 #define UNICODE
@@ -363,7 +365,15 @@ struct PingPong {
   unsigned long long handovers = 0;
 };
 
-NOINLINE void pass_token(PingPong& p, bool mine) {
+NOINLINE void do_work(int microseconds) {
+  if (microseconds <= 0) return;
+  const auto until = std::chrono::steady_clock::now() + std::chrono::microseconds(microseconds);
+  volatile unsigned long long n = 0;
+  while (std::chrono::steady_clock::now() < until) n = n + 1;
+}
+
+NOINLINE void pass_token(PingPong& p, bool mine, int workUs) {
+  do_work(workUs);
   std::unique_lock<std::mutex> hold(p.lock);
   p.changed.wait(hold, [&] { return p.ping == mine || g_quit; });
   p.ping = !mine;
@@ -372,23 +382,23 @@ NOINLINE void pass_token(PingPong& p, bool mine) {
   p.changed.notify_one();
 }
 
-void RunBench(int seconds) {
+void RunBench(int seconds, int workUs) {
   const unsigned pairs = (std::max)(1u, std::thread::hardware_concurrency() / 2);
   std::vector<PingPong> games(pairs);
   std::vector<std::thread> threads;
   const auto start = std::chrono::steady_clock::now();
   for (PingPong& p : games)
     for (bool side : {true, false})
-      threads.emplace_back([&p, side] {
+      threads.emplace_back([&p, side, workUs] {
         NameThisThread(side ? L"ping" : L"pong");
-        while (!g_quit) pass_token(p, side);
+        while (!g_quit) pass_token(p, side, workUs);
         p.changed.notify_all();
       });
   for (std::thread& t : threads) t.join();
   const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
   unsigned long long total = 0;
   for (const PingPong& p : games) total += p.handovers;
-  std::printf("bench: %u pairs, %d s, %.0f hand-overs per second\n", pairs, seconds,
+  std::printf("bench: %u pairs, %d us of work, %d s, %.0f hand-overs per second\n", pairs, workUs, seconds,
               static_cast<double>(total) / (elapsed > 0 ? elapsed : 1));
 }
 
@@ -397,11 +407,14 @@ void RunBench(int seconds) {
 int main(int argc, char** argv) {
   std::string mode;
   int seconds = 15;
+  int workUs = 0;  // bench only
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--mode") == 0 && i + 1 < argc) {
       mode = argv[++i];
     } else if (std::strcmp(argv[i], "--seconds") == 0 && i + 1 < argc) {
       seconds = std::atoi(argv[++i]);
+    } else if (std::strcmp(argv[i], "--work-us") == 0 && i + 1 < argc) {
+      workUs = std::atoi(argv[++i]);
     } else {
       mode.clear();
       break;
@@ -427,10 +440,11 @@ int main(int argc, char** argv) {
   else if (mode == "child") RunChild();
   else if (mode == "lockcpu" || mode == "locksleep" || mode == "lockdisk") RunLock(mode);
   else if (mode == "sleep") RunSleep();
-  else if (mode == "bench") RunBench(seconds);
+  else if (mode == "bench") RunBench(seconds, workUs);
   else {
     std::printf("usage: scenarios --mode condvar|coldread|console|pipe|socket|cpu|child|\n"
-                "                        lockcpu|locksleep|lockdisk|sleep|bench [--seconds N]\n");
+                "                        lockcpu|locksleep|lockdisk|sleep|bench [--seconds N]\n"
+                "                        [--work-us N, bench only]\n");
     return 1;
   }
   return 0;
