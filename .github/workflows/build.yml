@@ -138,6 +138,22 @@ jobs:
           # W27: with Microsoft's symbols, ntdll has full names.
           $symbols = $null
           if (Test-Path .\symsrv.dll) { $symbols = Watch-Slowapp 'symbols' @() @('--symbols', 'ms') }
+          # W38: record the buggy slowapp into an .etl file, then report from the file alone.
+          $app = Start-Process -FilePath (Resolve-Path .\slowapp.exe) -PassThru -WindowStyle Hidden `
+            -ArgumentList @('--seconds', '20', '--mb', '64')
+          Start-Sleep -Seconds 3
+          $recorded = & .\waitwhy.exe record --pid $app.Id --seconds 8 --out buggy.etl 2>&1 | Out-String
+          $recordCode = $LASTEXITCODE
+          if (-not $app.HasExited) { Stop-Process -Id $app.Id -ErrorAction SilentlyContinue }
+          Write-Host "===== waitwhy record (exit code $recordCode) ====="
+          Write-Host $recorded
+          $fromEtl = & .\waitwhy.exe analyze buggy.etl 2>&1 | Out-String
+          $fromEtlCode = $LASTEXITCODE
+          Set-Content -Path etl-report.txt -Value $fromEtl -Encoding utf8
+          Write-Host "===== waitwhy analyze buggy.etl (exit code $fromEtlCode) ====="
+          Write-Host $fromEtl
+          $fromEtlByName = & .\waitwhy.exe analyze buggy.etl --name slowapp.exe 2>&1 | Out-String
+          $fromEtlByNameCode = $LASTEXITCODE
 
           # Function names can carry a namespace, e.g. slowapp!`anonymous namespace'::update_frame.
           # In the fixed run saver still waits on the disk, which is fine; only the lock must go.
@@ -212,6 +228,17 @@ jobs:
           }
           if ($launch -notmatch 'Started .*slowapp' -or $launch -notmatch '\(main(, exited)?\) spent \d+% of the time waiting for a lock that another thread was holding, in slowapp!.*update_frame\.') {
             $failures += 'Launch run: slowapp was not started and watched, or its lock wait was not found.'
+          }
+          if ($recordCode -ne 0 -or -not (Test-Path buggy.etl) -or -not (Test-Path buggy.etl.waitwhy)) {
+            $failures += "Record run: waitwhy record exited with $recordCode or wrote no buggy.etl and buggy.etl.waitwhy."
+          }
+          if ($fromEtlCode -ne 0 -or
+              $fromEtl -notmatch '\(main\) spent \d+% of the time waiting for a lock that another thread was holding, in slowapp!.*update_frame\.' -or
+              $fromEtl -notmatch 'The lock was released by Thread \d+ \(saver\)') {
+            $failures += 'Record run: the report from buggy.etl does not show the lock in update_frame released by saver.'
+          }
+          if ($fromEtlByNameCode -ne 0 -or $fromEtlByName -notmatch 'update_frame') {
+            $failures += 'Record run: analyze buggy.etl --name slowapp.exe did not find the lock wait.'
           }
           if ($symbols -and $symbols -notmatch 'Function names   : full names in [^;\r\n]*ntdll') {
             $failures += 'Symbols run: ntdll has no full names with --symbols ms.'
@@ -309,6 +336,8 @@ jobs:
             buggy-chrome.json
             buggy-speedscope.json
             buggy.html
+            etl-report.txt
+            buggy.etl.waitwhy
           if-no-files-found: ignore
 
   # The analysis core (analysis.h) makes no Windows calls (D7), so its tests also run here, with

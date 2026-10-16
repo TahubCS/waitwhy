@@ -119,7 +119,9 @@ constexpr UCHAR kOpThreadDcStart = 3;  // "already running when the trace starte
 constexpr UCHAR kOpCSwitch = 36;
 constexpr UCHAR kOpReadyThread = 50;
 constexpr UCHAR kOpStackWalk = 32;     // inside the StackWalk class
+constexpr UCHAR kOpThreadSetName = 72;  // a thread named itself (W38)
 constexpr UCHAR kOpProcessStart = 1;   // inside the Process class (W33)
+constexpr UCHAR kOpProcessDcStart = 3;  // inside the Process class: running when the trace started
 constexpr UCHAR kOpImageDcStart = 3;   // inside the Image class: loaded when the trace started
 constexpr UCHAR kOpImageLoad = 10;     // inside the Image class: loaded during the trace
 // Inside the FileIo class (W28): names of file objects, and the requests on them.
@@ -164,6 +166,7 @@ struct ClassicEventId {  // same layout as CLASSIC_EVENT_ID
 struct SessionProps {
   EVENT_TRACE_PROPERTIES props;
   wchar_t loggerName[64];
+  wchar_t logFile[1024];  // waitwhy record (W38): the .etl file the session writes
 };
 
 // UTF-16 to UTF-8.
@@ -202,6 +205,10 @@ std::wstring DosPath(const std::wstring& path) {
 
 Analyzer g_analysis;
 std::vector<uint32_t> g_cpuThread(256, kUnknownThread);  // thread currently on each CPU
+// Reading a recorded .etl file (W38): nothing may be asked of the live system, whose processes
+// and threads may be others with the same IDs.
+bool g_fromTraceFile = false;
+uint64_t g_stackWalkEvents = 0;  // all StackWalk events seen, whichever thread they were for
 std::atomic<bool> g_stopRequested{false};
 // End of the observation window, set by the main thread when it stops watching; 0 until then
 // (W20). Events stamped later are still delivered until the session stops; they are not counted.
@@ -213,6 +220,34 @@ bool PastWindow(uint64_t ts) {
 }
 FILE* g_dump = nullptr;   // --dump-events output; null when not asked for
 uint64_t g_dumpLines = 0;
+
+// A property of an event, found through TDH by its name whatever its place, as raw bytes;
+// empty when the event has none (W38).
+std::vector<BYTE> EventProperty(const EVENT_RECORD* ev, const wchar_t* name) {
+  PROPERTY_DATA_DESCRIPTOR d{};
+  d.PropertyName = reinterpret_cast<ULONGLONG>(name);
+  d.ArrayIndex = ULONG_MAX;
+  ULONG size = 0;
+  auto* record = const_cast<PEVENT_RECORD>(ev);
+  if (TdhGetPropertySize(record, 0, nullptr, 1, &d, &size) != ERROR_SUCCESS || size == 0) return {};
+  std::vector<BYTE> bytes(size);
+  if (TdhGetProperty(record, 0, nullptr, 1, &d, size, bytes.data()) != ERROR_SUCCESS) return {};
+  return bytes;
+}
+
+// Names the program's threads gave themselves, from a recorded trace's thread events (W38).
+std::map<uint32_t, std::string> g_traceThreadNames;
+
+void RememberTraceThreadName(const EVENT_RECORD* ev, uint32_t tid) {
+  const std::vector<BYTE> bytes = EventProperty(ev, L"ThreadName");
+  std::wstring name;
+  for (size_t i = 0; i + 1 < bytes.size(); i += 2) {
+    const auto ch = static_cast<wchar_t>(bytes[i] | (bytes[i + 1] << 8));
+    if (ch == L'\0') break;
+    name += ch;
+  }
+  if (!name.empty()) g_traceThreadNames[tid] = Narrow(name);
+}
 
 void OnCSwitch(const EVENT_RECORD* ev, uint64_t ts) {
   if (ev->UserDataLength < sizeof(CSwitchPayload)) return;
@@ -274,6 +309,8 @@ void OnThreadEvent(const EVENT_RECORD* ev, ThreadEvent::Kind kind) {
   e.kind = kind;
   std::memcpy(&e.pid, ev->UserData, sizeof e.pid);
   std::memcpy(&e.tid, static_cast<const uint8_t*>(ev->UserData) + 4, sizeof e.tid);
+  if (g_fromTraceFile && kind != ThreadEvent::Kind::Ended && g_analysis.IsWatched(e.pid))
+    RememberTraceThreadName(ev, e.tid);
   if (g_dump && g_analysis.IsWatched(e.pid)) {
     std::fprintf(g_dump, "THREAD ts=%llu kind=%d pid=%u tid=%u\n",
                  static_cast<unsigned long long>(e.ts), static_cast<int>(kind), e.pid, e.tid);
@@ -285,6 +322,7 @@ void OnThreadEvent(const EVENT_RECORD* ev, ThreadEvent::Kind kind) {
 void OnStackWalk(const EVENT_RECORD* ev) {
   // Layout: uint64 EventTimeStamp, uint32 StackProcess, uint32 StackThread, then addresses.
   if (ev->UserDataLength < 16) return;
+  ++g_stackWalkEvents;
   const auto* p = static_cast<const uint8_t*>(ev->UserData);
   StackEvent e;
   e.ts = static_cast<uint64_t>(ev->EventHeader.TimeStamp.QuadPart);
@@ -328,6 +366,9 @@ struct ImageInfo {
   std::wstring path;  // as the kernel names it, e.g. \Device\HarddiskVolume3\...\ntdll.dll
 };
 std::map<uint32_t, std::vector<ImageInfo>> g_images;  // by process
+// The processes a recorded trace holds (W38), in the order first seen: ID -> file name.
+std::map<uint32_t, std::string> g_traceProcessNames;
+std::vector<uint32_t> g_traceProcessOrder;
 
 void OnImage(const EVENT_RECORD* ev) {
   // Image_Load (versions 2 and 3): ImageBase, ImageSize (pointers), ProcessId, ImageCheckSum,
@@ -576,6 +617,11 @@ void WINAPI OnEvent(PEVENT_RECORD ev) {
       OnThreadEvent(ev, ThreadEvent::Kind::Existing);
     } else if (op == kOpThreadEnd) {
       OnThreadEvent(ev, ThreadEvent::Kind::Ended);
+    } else if (op == kOpThreadSetName && g_fromTraceFile && ev->UserDataLength >= 8) {
+      uint32_t pid = 0, tid = 0;
+      std::memcpy(&pid, ev->UserData, sizeof pid);
+      std::memcpy(&tid, static_cast<const uint8_t*>(ev->UserData) + 4, sizeof tid);
+      if (g_analysis.IsWatched(pid)) RememberTraceThreadName(ev, tid);
     }
   } else if (IsEqualGUID(h.ProviderId, kStackWalkGuid) && op == kOpStackWalk) {
     OnStackWalk(ev);
@@ -588,6 +634,24 @@ void WINAPI OnEvent(PEVENT_RECORD ev) {
   }
 }
 
+// The first pass over a recorded trace (W38): which processes it holds, by ID and file name.
+void WINAPI OnProcessListEvent(PEVENT_RECORD ev) {
+  const EVENT_HEADER& h = ev->EventHeader;
+  const UCHAR op = h.EventDescriptor.Opcode;
+  if (!IsEqualGUID(h.ProviderId, kProcessGuid) || (op != kOpProcessStart && op != kOpProcessDcStart)) return;
+  const EventFields& f = EventFieldsOf(ev);
+  const int at = f.Offset(L"ProcessId");
+  if (!f.ok || at < 0 || static_cast<size_t>(at) + 4 > ev->UserDataLength) return;
+  uint32_t pid = 0;
+  std::memcpy(&pid, static_cast<const uint8_t*>(ev->UserData) + at, sizeof pid);
+  if (g_traceProcessNames.count(pid)) return;  // an ID used again later keeps its first process
+  const std::vector<BYTE> name = EventProperty(ev, L"ImageFileName");  // an ANSI string
+  size_t length = 0;
+  while (length < name.size() && name[length] != 0) ++length;
+  g_traceProcessNames[pid] = std::string(reinterpret_cast<const char*>(name.data()), length);
+  g_traceProcessOrder.push_back(pid);
+}
+
 // ---------------------------------------------------------------------------
 // Kernel trace session
 // ---------------------------------------------------------------------------
@@ -596,7 +660,7 @@ void WINAPI OnEvent(PEVENT_RECORD ev) {
 // "NT Kernel Logger" where Windows cannot give one.
 std::wstring g_sessionName = kLoggerName;
 
-void FillProps(SessionProps& sp, bool forStart, bool privateSession = false) {
+void FillProps(SessionProps& sp, bool forStart, bool privateSession = false, const std::wstring& logFile = L"") {
   std::memset(&sp, 0, sizeof sp);
   sp.props.Wnode.BufferSize = sizeof sp;
   sp.props.LoggerNameOffset = offsetof(SessionProps, loggerName);
@@ -610,6 +674,11 @@ void FillProps(SessionProps& sp, bool forStart, bool privateSession = false) {
       EVENT_TRACE_FLAG_DISK_FILE_IO |
       EVENT_TRACE_FLAG_FILE_IO | EVENT_TRACE_FLAG_FILE_IO_INIT;
   sp.props.LogFileMode = EVENT_TRACE_REAL_TIME_MODE;
+  if (!logFile.empty()) {  // waitwhy record (W38): into a file instead
+    sp.props.LogFileMode = EVENT_TRACE_FILE_MODE_SEQUENTIAL;
+    sp.props.LogFileNameOffset = offsetof(SessionProps, logFile);
+    wcsncpy_s(sp.logFile, logFile.c_str(), _TRUNCATE);
+  }
   // A system-logger session (Windows 8 and later) gets the kernel's events under a name of its
   // own, so tools using "NT Kernel Logger" keep running.
   if (privateSession) sp.props.LogFileMode |= EVENT_TRACE_SYSTEM_LOGGER_MODE;
@@ -664,11 +733,11 @@ void StopLeftoverSessions() {
   }
 }
 
-ULONG StartKernelSession(TRACEHANDLE* session) {
+ULONG StartKernelSession(TRACEHANDLE* session, const std::wstring& logFile = L"") {
   StopLeftoverSessions();
   SessionProps sp;
   const std::wstring privateName = kPrivatePrefix + std::to_wstring(GetCurrentProcessId());
-  FillProps(sp, true, true);
+  FillProps(sp, true, true, logFile);
   ULONG rc = StartTraceW(session, privateName.c_str(), &sp.props);
   if (rc == ERROR_SUCCESS) {
     g_sessionName = privateName;
@@ -679,12 +748,12 @@ ULONG StartKernelSession(TRACEHANDLE* session) {
               "      \"NT Kernel Logger\" session, which stops any other tool that uses it.\n",
               rc);
   g_sessionName = kLoggerName;
-  FillProps(sp, true);
+  FillProps(sp, true, false, logFile);
   rc = StartTraceW(session, kLoggerName, &sp.props);
   if (rc == ERROR_ALREADY_EXISTS) {
     std::printf("Note: another tool left the kernel trace session running; stopping it first.\n");
     StopKernelSession();
-    FillProps(sp, true);
+    FillProps(sp, true, false, logFile);
     rc = StartTraceW(session, kLoggerName, &sp.props);
   }
   return rc;
@@ -792,7 +861,7 @@ std::string ThreadLabel(uint32_t tid) {
     if (remembered != g_threadNames.end()) return cache[tid] = label + " (" + remembered->second + ", exited)";
     return cache[tid] = label + " (exited)";
   }
-  std::string name = ThreadDescription(tid);
+  std::string name = g_fromTraceFile ? std::string() : ThreadDescription(tid);
   if (name.empty() && remembered != g_threadNames.end()) name = remembered->second;
   if (!name.empty()) label += " (" + name + ")";
   return cache[tid] = label;
@@ -1071,7 +1140,10 @@ void NameWakerProcesses() {
       const uint32_t owner = it->second;
       if (an.processNames.count(owner)) continue;
       std::string label = owner == Analyzer::kSystemProcess ? "System" : "";
-      if (HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, owner)) {
+      if (g_fromTraceFile) {
+        auto named = g_traceProcessNames.find(owner);
+        if (named != g_traceProcessNames.end() && label.empty()) label = named->second;
+      } else if (HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, owner)) {
         wchar_t path[MAX_PATH];
         DWORD len = MAX_PATH;
         if (QueryFullProcessImageNameW(process, 0, path, &len)) {
@@ -1286,6 +1358,176 @@ int ReportFromDump(const std::wstring& path, ReportOptions opt) {
   return code != kExitOk ? code : exported;
 }
 
+// ---------------------------------------------------------------------------
+// Recorded traces (W38): waitwhy record writes an .etl file, waitwhy analyze reads it
+// ---------------------------------------------------------------------------
+
+bool IsTraceFile(const std::wstring& path) {
+  return path.size() > 4 && _wcsicmp(path.c_str() + path.size() - 4, L".etl") == 0;
+}
+
+// What an .etl file cannot hold is kept beside it, in FILE.etl.waitwhy: the program it was
+// recorded for, the window, and the names the program's threads gave themselves.
+struct RecordInfo {
+  bool found = false;
+  uint32_t pid = 0;
+  std::vector<uint32_t> others;
+  bool children = false;
+  uint64_t start = 0, end = 0;
+  std::map<uint32_t, std::string> threadNames;
+};
+
+std::wstring RecordInfoPath(const std::wstring& etl) { return etl + L".waitwhy"; }
+
+bool WriteRecordInfo(const std::wstring& etl, uint64_t start, uint64_t end) {
+  FILE* f = nullptr;
+  if (_wfopen_s(&f, RecordInfoPath(etl).c_str(), L"w") != 0 || !f) return false;
+  std::fprintf(f, "# waitwhy record: what the trace beside this file was recorded for; waitwhy analyze reads it.\n");
+  std::fprintf(f, "RECORD version=1 pid=%u start=%llu end=%llu children=%d\n", g_analysis.pid,
+               static_cast<unsigned long long>(start), static_cast<unsigned long long>(end),
+               g_followChildren ? 1 : 0);
+  for (uint32_t other : g_analysis.otherPids) std::fprintf(f, "WATCH pid=%u\n", other);
+  const std::map<uint32_t, std::string> names(g_threadNames.begin(), g_threadNames.end());
+  for (const auto& [tid, name] : names) std::fprintf(f, "THREADNAME tid=%u name=%s\n", tid, name.c_str());
+  return std::fclose(f) == 0;
+}
+
+RecordInfo ReadRecordInfo(const std::wstring& etl) {
+  RecordInfo info;
+  std::ifstream in(std::filesystem::path(RecordInfoPath(etl)));
+  auto field = [](const std::string& line, const std::string& key) -> std::string {
+    const std::string k = " " + key + "=";
+    size_t at = line.find(k);
+    if (at == std::string::npos) return {};
+    at += k.size();
+    return key == "name" ? line.substr(at) : line.substr(at, line.find(' ', at) - at);
+  };
+  auto number = [&field](const std::string& line, const char* key) {
+    return std::strtoull(field(line, key).c_str(), nullptr, 10);
+  };
+  std::string line;
+  while (std::getline(in, line)) {
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    if (line.compare(0, 7, "RECORD ") == 0) {
+      info.found = true;
+      info.pid = static_cast<uint32_t>(number(line, "pid"));
+      info.start = number(line, "start");
+      info.end = number(line, "end");
+      info.children = number(line, "children") != 0;
+    } else if (line.compare(0, 6, "WATCH ") == 0) {
+      info.others.push_back(static_cast<uint32_t>(number(line, "pid")));
+    } else if (line.compare(0, 11, "THREADNAME ") == 0) {
+      info.threadNames[static_cast<uint32_t>(number(line, "tid"))] = field(line, "name");
+    }
+  }
+  return info;
+}
+
+// Reads one .etl file from its start to its end through `callback`.
+bool ReadTraceFile(const std::wstring& path, PEVENT_RECORD_CALLBACK callback, TRACE_LOGFILE_HEADER* header,
+                   ULONG* error) {
+  std::wstring file = path;
+  EVENT_TRACE_LOGFILEW logfile{};
+  logfile.LogFileName = &file[0];
+  logfile.ProcessTraceMode = PROCESS_TRACE_MODE_EVENT_RECORD | PROCESS_TRACE_MODE_RAW_TIMESTAMP;
+  logfile.EventRecordCallback = callback;
+  TRACEHANDLE handle = OpenTraceW(&logfile);
+  if (handle == INVALID_PROCESSTRACE_HANDLE) {
+    *error = GetLastError();
+    return false;
+  }
+  *header = logfile.LogfileHeader;
+  *error = ProcessTrace(&handle, 1, nullptr, nullptr);
+  CloseTrace(handle);
+  return *error == ERROR_SUCCESS;
+}
+
+// Raw timestamps count in the clock the trace was recorded with (WNODE_HEADER.ClientContext).
+double TraceTicksPerSecond(const TRACE_LOGFILE_HEADER& h) {
+  if (h.ReservedFlags == 2) return 1e7;  // system time, in 100 ns
+  if (h.ReservedFlags == 3 && h.CpuSpeedInMHz) return h.CpuSpeedInMHz * 1e6;  // CPU cycles
+  return h.PerfFreq.QuadPart > 0 ? static_cast<double>(h.PerfFreq.QuadPart) : 1e7;  // QPC
+}
+
+// waitwhy analyze FILE.etl: a trace from waitwhy record, or a WPR or xperf trace with context
+// switches (and their stacks), through the same decoding and analysis as a live watch.
+int AnalyzeTraceFile(const std::wstring& path, ReportOptions opt, uint32_t pid, const std::wstring& name,
+                     bool allInstances) {
+  g_fromTraceFile = true;
+  TRACE_LOGFILE_HEADER header{};
+  ULONG error = 0;
+  if (!ReadTraceFile(path, OnProcessListEvent, &header, &error)) {
+    std::printf("Cannot read the trace %s (error %lu). Is it an .etl file?\n", Narrow(path).c_str(), error);
+    return kExitUsage;
+  }
+  const RecordInfo record = ReadRecordInfo(path);
+  std::vector<uint32_t> others;
+  if (pid == 0 && name.empty()) {
+    if (!record.found) {
+      std::printf("%s does not say which program it was recorded for (there is no %s).\n"
+                  "Give it with --pid N or --name program.exe.\n",
+                  Narrow(path).c_str(), Narrow(RecordInfoPath(path)).c_str());
+      return kExitUsage;
+    }
+    pid = record.pid;
+    others = record.others;
+    if (record.children) g_followChildren = true;
+  } else if (!name.empty()) {
+    std::vector<uint32_t> found;
+    for (uint32_t p : g_traceProcessOrder)
+      if (_stricmp(g_traceProcessNames[p].c_str(), Narrow(name).c_str()) == 0) found.push_back(p);
+    if (found.empty()) {
+      std::printf("No process named %s is in %s.\n", Narrow(name).c_str(), Narrow(path).c_str());
+      return kExitUsage;
+    }
+    pid = found[0];
+    if (allInstances)
+      others.assign(found.begin() + 1, found.end());
+    else if (found.size() > 1)
+      std::printf("Note: %zu processes in the trace are named %s; reporting on PID %u. Use --all for all of\n"
+                  "      them, or --pid to choose one.\n",
+                  found.size(), Narrow(name).c_str(), pid);
+  } else if (!g_traceProcessNames.count(pid)) {
+    std::printf("No process with ID %u is in %s.\n", pid, Narrow(path).c_str());
+    return kExitUsage;
+  }
+  g_analysis.pid = pid;
+  g_analysis.otherPids.insert(others.begin(), others.end());
+  const bool sameProgram = record.found && record.pid == pid;
+  if (sameProgram) {
+    // The window waitwhy record watched; events before it set the threads' states.
+    g_analysis.firstTs = record.start;
+    g_windowEnd.store(record.end, std::memory_order_relaxed);
+    g_threadNames.insert(record.threadNames.begin(), record.threadNames.end());
+  }
+  if (!ReadTraceFile(path, OnEvent, &header, &error)) {
+    std::printf("Cannot read the trace %s (error %lu).\n", Narrow(path).c_str(), error);
+    return kExitUsage;
+  }
+  if (sameProgram && record.end > record.start) g_analysis.lastTs = record.end;
+  for (const auto& [tid, threadName] : g_traceThreadNames) g_threadNames.emplace(tid, threadName);
+  const bool stacksOn = g_stackWalkEvents > 0;
+  g_analysis.stacksOn = stacksOn;
+  g_analysis.FlushAtEnd();
+  NameWakerProcesses();
+  std::map<uint32_t, std::unique_ptr<Symbolizer>> symbolizers;
+  auto symbolsFor = [&](uint32_t process) -> Symbolizer& {
+    auto it = symbolizers.find(process);
+    if (it != symbolizers.end()) return *it->second;
+    auto sym = std::make_unique<Symbolizer>();
+    sym->InitFromImages(g_images[process], process);
+    return *symbolizers.emplace(process, std::move(sym)).first->second;
+  };
+  Symbolizer& sym = symbolsFor(pid);
+  for (uint32_t process : WatchedProcesses()) symbolsFor(process);
+  std::fputs(SymbolServerNote(sym.SearchPath()).c_str(), stdout);
+  SessionProps lost{};
+  lost.props.EventsLost = header.EventsLost;
+  lost.props.RealTimeBuffersLost = header.BuffersLost;
+  if (!g_output.json && !g_output.html) std::printf("Report from the trace %s.\n", Narrow(path).c_str());
+  return PrintReport(TraceTicksPerSecond(header), opt, lost, stacksOn, symbolsFor, sym.Ok());
+}
+
 void Usage() {
   std::printf(
       "waitwhy %s - what is a program waiting for when it is slow but the CPU is idle?\n"
@@ -1297,9 +1539,15 @@ void Usage() {
       "  waitwhy [watch] [options] -- program.exe [its arguments]\n"
       "      Start the program and watch it from its first instruction, until it exits\n"
       "      (or for --seconds). Needs an Administrator shell.\n"
+      "  waitwhy record --out FILE.etl [watch options] (--pid N | --name X | -- program)\n"
+      "      Record the kernel trace into FILE.etl (and FILE.etl.waitwhy) to report on\n"
+      "      later, here or on another machine. Needs an Administrator shell.\n"
       "  waitwhy analyze FILE [report options]\n"
       "      Report again from a FILE written by --dump-events, on any machine.\n"
       "      (--from-dump FILE does the same.)\n"
+      "  waitwhy analyze FILE.etl [--pid N | --name X [--all]] [--symbols ...] [report options]\n"
+      "      Report from a trace written by waitwhy record, or by WPR or xperf with\n"
+      "      context switches and their call stacks. Needs no Administrator shell.\n"
       "  waitwhy diff BEFORE.json AFTER.json [--fail-if-worse N]\n"
       "      Compare two JSON reports by activity; with --fail-if-worse, exit with 3\n"
       "      when one got worse by more than N percentage points, or a finding is new.\n"
@@ -1414,6 +1662,7 @@ int wmain(int argc, wchar_t** argv) {
   bool secondsGiven = false;
   bool allInstances = false;  // --all (W33)
   std::vector<std::wstring> launch;  // W32: the program to start, after "--"
+  bool recording = false;  // waitwhy record (W38)
   ReportOptions shown;  // what the report shows: --top, --min-ms, --stall-ms
   // Command line v1 (W30): an optional command first; without one it means watch.
   int first = 1;
@@ -1435,7 +1684,8 @@ int wmain(int argc, wchar_t** argv) {
   } else if (command == L"diff") {
     return DiffCommand(argc, argv);
   } else if (command == L"record") {
-    return UsageError("'waitwhy record' is not available in this version.");
+    recording = true;
+    first = 2;
   }
   auto number = [](const wchar_t* text, double* value) {
     wchar_t* end = nullptr;
@@ -1511,7 +1761,26 @@ int wmain(int argc, wchar_t** argv) {
       g_output.speedscopeFile = value;
     }
   }
+  // waitwhy record (W38): the trace goes into the --out file; the report comes from analyze.
+  std::wstring recordFile;
+  if (recording) {
+    if (g_output.file.empty()) return UsageError("waitwhy record needs --out FILE.etl, the file to record into.");
+    if (g_output.json || g_output.html || !g_output.chromeFile.empty() || !g_output.speedscopeFile.empty() ||
+        !dumpPath.empty() || !fromDump.empty())
+      return UsageError("waitwhy record only records. Give report options to: waitwhy analyze FILE.etl");
+    std::error_code ec;
+    recordFile = std::filesystem::absolute(std::filesystem::path(g_output.file), ec).wstring();
+    if (ec || !IsTraceFile(recordFile)) return UsageError("waitwhy record --out needs a file name ending in .etl.");
+    g_output.file.clear();
+  }
   KeepConsoleForJson();
+  if (!fromDump.empty() && IsTraceFile(fromDump)) {
+    if (!dumpPath.empty() || !launch.empty())
+      return UsageError("A report from an .etl file takes no --dump-events or -- program.");
+    if (pid != 0 && !name.empty()) return UsageError("Give only one of --pid and --name.");
+    if (allInstances && name.empty()) return UsageError("--all needs --name: it reports on every process of that name.");
+    return AnalyzeTraceFile(fromDump, shown, pid, name, allInstances);
+  }
   if (!fromDump.empty()) {
     if (pid != 0 || !name.empty() || !dumpPath.empty())
       return UsageError("A report from a dump takes no --pid, --name or --dump-events.");
@@ -1612,7 +1881,7 @@ int wmain(int argc, wchar_t** argv) {
   }
 
   TRACEHANDLE session = 0;
-  ULONG rc = StartKernelSession(&session);
+  ULONG rc = StartKernelSession(&session, recordFile);
   if (rc != ERROR_SUCCESS) abandonLaunch();
   if (rc == ERROR_ACCESS_DENIED) {
     std::printf("Access denied. Run waitwhy from an Administrator PowerShell window.\n");
@@ -1626,17 +1895,21 @@ int wmain(int argc, wchar_t** argv) {
   const bool stacksOn = EnableContextSwitchStacks(session);
   g_analysis.stacksOn = stacksOn;
 
-  EVENT_TRACE_LOGFILEW logfile{};
-  logfile.LoggerName = const_cast<LPWSTR>(g_sessionName.c_str());
-  logfile.ProcessTraceMode = PROCESS_TRACE_MODE_REAL_TIME | PROCESS_TRACE_MODE_EVENT_RECORD |
-                             PROCESS_TRACE_MODE_RAW_TIMESTAMP;
-  logfile.EventRecordCallback = OnEvent;
-  TRACEHANDLE consumer = OpenTraceW(&logfile);
-  if (consumer == INVALID_PROCESSTRACE_HANDLE) {
-    std::printf("Could not open the trace for reading (error %lu).\n", GetLastError());
-    abandonLaunch();
-    StopKernelSession();
-    return kExitTraceUnavailable;
+  // Watching reads the events as they come; recording leaves them to the file.
+  TRACEHANDLE consumer = INVALID_PROCESSTRACE_HANDLE;
+  if (!recording) {
+    EVENT_TRACE_LOGFILEW logfile{};
+    logfile.LoggerName = const_cast<LPWSTR>(g_sessionName.c_str());
+    logfile.ProcessTraceMode = PROCESS_TRACE_MODE_REAL_TIME | PROCESS_TRACE_MODE_EVENT_RECORD |
+                               PROCESS_TRACE_MODE_RAW_TIMESTAMP;
+    logfile.EventRecordCallback = OnEvent;
+    consumer = OpenTraceW(&logfile);
+    if (consumer == INVALID_PROCESSTRACE_HANDLE) {
+      std::printf("Could not open the trace for reading (error %lu).\n", GetLastError());
+      abandonLaunch();
+      StopKernelSession();
+      return kExitTraceUnavailable;
+    }
   }
   // The window starts now, before the first event is read, so the reader thread never sees it
   // change (W20). Events Windows logged since the session started still set each thread's
@@ -1648,19 +1921,21 @@ int wmain(int argc, wchar_t** argv) {
     std::fprintf(g_dump, "WINDOW ts=%llu\n", static_cast<unsigned long long>(g_analysis.firstTs));
     ++g_dumpLines;
   }
-  std::thread reader([&consumer] { ProcessTrace(&consumer, 1, nullptr, nullptr); });
+  std::thread reader;
+  if (!recording) reader = std::thread([&consumer] { ProcessTrace(&consumer, 1, nullptr, nullptr); });
+  const char* const verb = recording ? "recording" : "watching";
 
   if (launched.hThread) {
     ResumeThread(launched.hThread);
     CloseHandle(launched.hThread);
     launched.hThread = nullptr;
     if (secondsGiven)
-      std::printf("Started %s (PID %u); watching it for %d seconds", Narrow(launch[0]).c_str(), pid, seconds);
+      std::printf("Started %s (PID %u); %s it for %d seconds", Narrow(launch[0]).c_str(), pid, verb, seconds);
     else
-      std::printf("Started %s (PID %u); watching it until it exits (Ctrl+C stops)", Narrow(launch[0]).c_str(), pid);
+      std::printf("Started %s (PID %u); %s it until it exits (Ctrl+C stops)", Narrow(launch[0]).c_str(), pid, verb);
   } else {
-    std::printf("Watching PID %u (%zu threads) for %d seconds", pid, g_analysis.targetThreads.size(),
-                seconds);
+    std::printf("%s PID %u (%zu threads) for %d seconds", recording ? "Recording" : "Watching", pid,
+                g_analysis.targetThreads.size(), seconds);
   }
   std::fflush(stdout);
   // Wait for a deadline on the same clock as the events, not for a number of sleeps: each sleep
@@ -1697,12 +1972,29 @@ int wmain(int argc, wchar_t** argv) {
   g_windowEnd.store(static_cast<uint64_t>(windowEnd.QuadPart), std::memory_order_relaxed);
   SessionProps stopped;
   StopKernelSession(&stopped);  // ProcessTrace returns once the buffers are drained
-  reader.join();
+  if (reader.joinable()) reader.join();
   g_analysis.lastTs = static_cast<uint64_t>(windowEnd.QuadPart);
-  CloseTrace(consumer);
+  if (consumer != INVALID_PROCESSTRACE_HANDLE) CloseTrace(consumer);
   if (launched.hProcess && !programExited)
     std::printf("Note: %s is still running; waitwhy leaves it running.\n", Narrow(launch[0]).c_str());
   CloseHandle(target);
+  if (recording) {
+    const bool infoWritten = WriteRecordInfo(recordFile, g_analysis.firstTs, g_analysis.lastTs);
+    std::error_code ec;
+    const auto bytes = std::filesystem::file_size(std::filesystem::path(recordFile), ec);
+    std::printf("Recorded %s of kernel events to %s (%.0f MB; %lu events and %lu buffers lost).\n",
+                FormatDuration(static_cast<double>(g_analysis.lastTs - g_analysis.firstTs) /
+                               static_cast<double>(freq.QuadPart)).c_str(),
+                Narrow(recordFile).c_str(), ec ? 0.0 : static_cast<double>(bytes) / 1e6,
+                stopped.props.EventsLost, stopped.props.LogBuffersLost);
+    if (!infoWritten)
+      std::printf("Note: could not write %s; give --pid %u to waitwhy analyze.\n",
+                  Narrow(RecordInfoPath(recordFile)).c_str(), pid);
+    std::printf("Make the report, here or on another machine (keep %s beside it):\n"
+                "  waitwhy analyze %s\n",
+                Narrow(RecordInfoPath(recordFile)).c_str(), Narrow(recordFile).c_str());
+    return kExitOk;
+  }
   if (g_dump) {
     std::fprintf(g_dump, "END ts=%llu contextSwitches=%llu stacksOn=%d eventsLost=%lu buffersLost=%lu\n",
                  static_cast<unsigned long long>(g_analysis.lastTs),

@@ -113,6 +113,17 @@ $report.findings | Where-Object category -eq 'lock'
 
 Two JSON reports can be compared, for example before and after a change: `waitwhy diff before.json after.json --fail-if-worse 10` exits with 3 when an activity got worse by more than 10 percentage points or a finding is new. `docs/ci-gate.md` shows how to use it in CI.
 
+## Record now, report later
+
+`waitwhy record --out trace.etl` records the kernel trace into a file instead of reporting at once; it takes the same ways of choosing the program (`--pid`, `--name`, `-- program`, `--children`) and `--seconds`. Beside the trace it writes `trace.etl.waitwhy`, with the program it was for, the window and the names of its threads. `waitwhy analyze trace.etl` makes the report from the file, with every report option (`--format`, `--export-chrome`, ...), and needs no Administrator shell:
+
+```powershell
+.\waitwhy.exe record --name slowapp.exe --seconds 8 --out slowapp.etl   # Administrator
+.\waitwhy.exe analyze slowapp.etl --format html --out slowapp.html
+```
+
+`analyze` also reads traces from WPR or xperf that have context switches with call stacks (for example `wpr -start CPU`); give the program with `--pid N` or `--name X`. On another machine, function names in the program's own code need its `.pdb`: put the folder holding it in `--symbols`, e.g. `--symbols "C:\build;srv*C:\symbols*https://msdl.microsoft.com/download/symbols"`. A trace holds what every process on the machine did while it ran, so share it only where you would share that.
+
 ## One page to share: HTML
 
 `--format html --out report.html` writes the report as a single HTML page that opens in any browser, offline: the findings, each measured wait chain as a bar, a timeline of every thread (hover for what it was doing), the biggest waits with their call stacks, an off-CPU flame graph of where the threads waited, and the data-quality section. Everything is inline, so the file can be attached to a bug report. `analyze` makes the same page from a dump:
