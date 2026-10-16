@@ -111,6 +111,8 @@ $report = .\waitwhy.exe --name slowapp.exe --seconds 5 --format json | ConvertFr
 $report.findings | Where-Object category -eq 'lock'
 ```
 
+Two JSON reports can be compared, for example before and after a change: `waitwhy diff before.json after.json --fail-if-worse 10` exits with 3 when an activity got worse by more than 10 percentage points or a finding is new. `docs/ci-gate.md` shows how to use it in CI.
+
 ## Report lines scripts can rely on
 
 Scripts that read the text report may match these lines; prefer the JSON report.
@@ -130,6 +132,7 @@ Scripts that read the text report may match these lines; prefer the JSON report.
 | 0 | The report was printed |
 | 1 | Bad arguments, or the program to watch was not found |
 | 2 | The kernel trace could not be started (not run as Administrator, or tracing is unavailable on this machine) |
+| 3 | `waitwhy diff --fail-if-worse`: waiting got worse than allowed |
 
 ## Known-answer scenarios
 

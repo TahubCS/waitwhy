@@ -155,6 +155,14 @@ jobs:
             $failures += 'JSON report: no lock finding in update_frame with a chain to saver.'
           }
 
+          # W35: diff as a CI gate. Going from the fixed to the buggy slowapp must fail it.
+          & .\waitwhy.exe analyze buggy-events.txt --format json --out buggy.json | Out-Null
+          & .\waitwhy.exe analyze fixed-events.txt --format json --out fixed.json | Out-Null
+          & .\waitwhy.exe diff fixed.json buggy.json --fail-if-worse 10 | Out-Host
+          if ($LASTEXITCODE -ne 3) { $failures += "diff: fixed -> buggy did not exit with 3 (got $LASTEXITCODE)." }
+          & .\waitwhy.exe diff buggy.json fixed.json --fail-if-worse 10 | Out-Host
+          if ($LASTEXITCODE -ne 0) { $failures += "diff: buggy -> fixed did not exit with 0 (got $LASTEXITCODE)." }
+
           # W28: the program's file I/O is traced and its files named; saver's file shows as the object.
           $buggyDump = Get-Content buggy-events.txt -Raw
           $fileIoLines = ([regex]::Matches($buggyDump, '(?m)^FILEIO ')).Count

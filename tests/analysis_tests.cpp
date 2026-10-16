@@ -8,6 +8,7 @@
 //   g++ -std=c++17 -Wall -Wextra tests/analysis_tests.cpp -o analysis_tests
 
 #include "../analysis.h"
+#include "../diff.h"
 #include "../report.h"
 #include "check.h"
 
@@ -484,6 +485,39 @@ void CheckWakerRefinesDisk() {
   ExpectCategory("write ended by the system", row(4) ? row(4)->category : Category::Other, Category::Disk);
 }
 
+// W35: two JSON reports compared by activity; the thread name, not its ID, matches them.
+void CheckDiff() {
+  std::printf("Comparing two reports (W35)\n");
+  const std::string fixed = R"js({"schema": "waitwhy-report/1", "program": "slowapp.exe",
+    "waits": [{"thread": "Thread 10 (main)", "category": "sleep", "yourCode": "slowapp!main", "pct": 95},
+              {"thread": "Thread 11 (saver)", "category": "disk", "yourCode": "slowapp!write", "pct": 60}],
+    "findings": [{"kind": "wait", "thread": "Thread 11 (saver)", "category": "disk", "yourCode": "slowapp!write"}]})js";
+  const std::string buggy = R"js({"schema": "waitwhy-report/1", "program": "slowapp.exe",
+    "waits": [{"thread": "Thread 20 (main)", "category": "lock", "yourCode": "slowapp!update_frame", "pct": 61.5},
+              {"thread": "Thread 21 (saver)", "category": "disk", "yourCode": "slowapp!write", "pct": 58},
+              {"thread": "Thread 20 (main)", "category": "sleep", "yourCode": "slowapp!main", "pct": 30}],
+    "findings": [{"kind": "wait", "thread": "Thread 20 (main)", "category": "lock", "yourCode": "slowapp!update_frame"},
+                 {"kind": "wait", "thread": "Thread 21 (saver)", "category": "disk", "yourCode": "slowapp!write"}]})js";
+  JsonValue a, b;
+  std::string error;
+  ExpectEq("fixed report reads", JsonReader(fixed).Read(&a, &error), 1);
+  ExpectEq("buggy report reads", JsonReader(buggy).Read(&b, &error), 1);
+  ExpectEq("broken JSON is refused", JsonReader("{\"a\": [1, 2").Read(&a, &error), 0);
+  a = JsonValue{};
+  JsonReader(fixed).Read(&a, &error);
+  const ReportDiff worse = DiffReports(a, b, 10);
+  ExpectEq("fixed -> buggy is worse", worse.worse, 1);
+  ExpectStr("most worsened first", worse.rows.empty() ? "" : worse.rows[0].category + " " + worse.rows[0].thread, "lock main");
+  ExpectEq("sleeps left out", worse.rows.size(), 2);
+  const ReportDiff better = DiffReports(b, a, 10);
+  ExpectEq("buggy -> fixed is not worse", better.worse, 0);
+  ExpectStr("thread name from an exited label", ThreadNameOf("Thread 964 (main, exited) [PID 7]"), "main");
+  ExpectStr("unnamed thread", ThreadNameOf("Thread 4088"), "(unnamed)");
+  JsonValue escaped;
+  JsonReader(R"js({"s": "a\"b\\c\u0041"})js").Read(&escaped, &error);
+  ExpectStr("escapes", escaped.Str("s"), "a\"b\\cA");
+}
+
 }  // namespace
 
 int main() {
@@ -500,6 +534,7 @@ int main() {
   CheckDurationHistogram();
   CheckObjectClassification();
   CheckWakerRefinesDisk();
+  CheckDiff();
   std::printf(Failures() ? "%d check(s) failed.\n" : "All checks passed.\n", Failures());
   return Failures() ? 1 : 0;
 }

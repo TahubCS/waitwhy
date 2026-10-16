@@ -63,6 +63,7 @@
 #include "analysis.h"
 #include "dump.h"
 #include "report.h"
+#include "diff.h"
 
 #ifdef _MSC_VER
 #pragma comment(lib, "advapi32.lib")
@@ -132,6 +133,7 @@ constexpr int kTraceStackTracingInfo = 3;  // TRACE_INFO_CLASS value
 constexpr int kExitOk = 0;
 constexpr int kExitUsage = 1;             // bad arguments, or the program cannot be found
 constexpr int kExitTraceUnavailable = 2;  // the kernel trace session could not be started
+constexpr int kExitWorse = 3;             // waitwhy diff: worse than allowed (W35)
 
 #pragma pack(push, 1)
 struct CSwitchPayload {
@@ -1259,6 +1261,9 @@ void Usage() {
       "  waitwhy analyze FILE [report options]\n"
       "      Report again from a FILE written by --dump-events, on any machine.\n"
       "      (--from-dump FILE does the same.)\n"
+      "  waitwhy diff BEFORE.json AFTER.json [--fail-if-worse N]\n"
+      "      Compare two JSON reports by activity; with --fail-if-worse, exit with 3\n"
+      "      when one got worse by more than N percentage points, or a finding is new.\n"
       "  waitwhy --help | --version\n"
       "\n"
       "Watch options:\n"
@@ -1281,7 +1286,8 @@ void Usage() {
       "                       N ms or more (default 50)\n"
       "\n"
       "Exit codes: 0 report printed; 1 bad arguments, or the program or file was not\n"
-      "found; 2 the kernel trace could not be started (not Administrator, or unavailable).\n",
+      "found; 2 the kernel trace could not be started (not Administrator, or unavailable);\n"
+      "3 waitwhy diff found it worse than allowed.\n",
       kVersion);
 }
 
@@ -1307,6 +1313,44 @@ std::wstring QuoteArgument(const std::wstring& arg) {
 int UsageError(const std::string& message) {
   std::printf("%s\nRun 'waitwhy --help' to see the options.\n", message.c_str());
   return kExitUsage;
+}
+
+// waitwhy diff BEFORE.json AFTER.json [--fail-if-worse N] (W35): compares two JSON reports by
+// activity. With --fail-if-worse it exits with 3 when an activity's share of its thread's time
+// grew by more than N points, or a finding is new.
+int DiffCommand(int argc, wchar_t** argv) {
+  std::vector<std::wstring> files;
+  double threshold = -1;
+  for (int i = 2; i < argc; ++i) {
+    const std::wstring a = argv[i];
+    if (a == L"--fail-if-worse") {
+      if (i + 1 >= argc) return UsageError("--fail-if-worse needs a number of percentage points, such as 10.");
+      wchar_t* end = nullptr;
+      threshold = std::wcstod(argv[++i], &end);
+      if (end == argv[i] || (*end != L'\0' && std::wcscmp(end, L"%") != 0) || threshold < 0)
+        return UsageError("--fail-if-worse needs a number of percentage points, such as 10.");
+    } else if (!a.empty() && a[0] == L'-') {
+      return UsageError("Unknown option '" + Narrow(a) + "' for waitwhy diff.");
+    } else {
+      files.push_back(a);
+    }
+  }
+  if (files.size() != 2)
+    return UsageError("waitwhy diff needs two JSON reports: the one before and the one after a change.");
+  JsonValue reports[2];
+  for (size_t k = 0; k < 2; ++k) {
+    std::ifstream in(std::filesystem::path(files[k]), std::ios::binary);
+    const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    std::string error;
+    if (text.empty() || !JsonReader(text).Read(&reports[k], &error) || reports[k].Str("schema") != kReportSchema) {
+      std::printf("%s is not a waitwhy JSON report (%s). Make one with --format json --out FILE.\n",
+                  Narrow(files[k]).c_str(), text.empty() ? "cannot read it" : error.empty() ? "no schema" : error.c_str());
+      return kExitUsage;
+    }
+  }
+  const ReportDiff d = DiffReports(reports[0], reports[1], threshold);
+  std::fputs(RenderDiff(d, threshold).c_str(), stdout);
+  return d.worse ? kExitWorse : kExitOk;
 }
 
 }  // namespace
@@ -1342,8 +1386,10 @@ int wmain(int argc, wchar_t** argv) {
     if (argc < 3 || argv[2][0] == L'-') return UsageError("waitwhy analyze needs the dump FILE to read.");
     fromDump = argv[2];
     first = 3;
-  } else if (command == L"record" || command == L"diff") {
-    return UsageError("'waitwhy " + Narrow(command) + "' is not available in this version.");
+  } else if (command == L"diff") {
+    return DiffCommand(argc, argv);
+  } else if (command == L"record") {
+    return UsageError("'waitwhy record' is not available in this version.");
   }
   auto number = [](const wchar_t* text, double* value) {
     wchar_t* end = nullptr;

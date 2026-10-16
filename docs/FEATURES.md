@@ -260,3 +260,4 @@ Newest line last. Format: `YYYY-MM-DD  ID  status  note`.
 - 2026-10-16  W28  confirmed  CI run #83: console output no longer "the disk"; the pipe client "waiting for another thread"; saver's file named in the buggy run.
 - 2026-10-16  W34  started  --format json and --out FILE from the report model; schema docs/report-schema.json (waitwhy-report/1); console JSON alone on stdout; golden JSON test; CI parses the buggy run's JSON.
 - 2026-10-16  W33  confirmed  CI run #84: scenario child with --children reports the child processes in the header and their threads as [PID N]; all other checks pass.
+- 2026-10-16  W35  started  waitwhy diff BEFORE.json AFTER.json [--fail-if-worse N], exit 3 when worse; JSON reader and comparison in diff.h; docs/ci-gate.md; CI: fixed -> buggy exits 3, buggy -> fixed exits 0.
