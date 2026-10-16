@@ -976,25 +976,44 @@ int ReportFromDump(const std::wstring& path, ReportOptions opt) {
   return kExitOk;
 }
 
+constexpr char kVersion[] = "0.9.0";
+
 void Usage() {
   std::printf(
-      "usage: waitwhy (--pid N | --name program.exe) [--seconds N] [--top N]\n"
-      "               [--min-ms N] [--stall-ms N] [--symbols ms|PATH]\n"
-      "               [--dump-events FILE]\n"
-      "       waitwhy --from-dump FILE [--top N] [--min-ms N] [--stall-ms N]\n"
-      "  Watches a running program and reports what its threads were waiting on.\n"
-      "  --dump-events also writes every context-switch, ready-thread, thread and stack\n"
-      "  event of the program's threads to FILE, one line each, in the order they\n"
-      "  arrived, then the names the report uses. Must be run as Administrator.\n"
-      "  --from-dump prints the report again from such a FILE, on any machine.\n"
-      "  --top N shows the N biggest groups of waits (default 6); --min-ms N hides\n"
-      "  groups smaller than N milliseconds (default 10). --stall-ms N reports any\n"
-      "  single lock, disk, network or page-fault wait of N ms or more (default 50).\n"
-      "  --symbols ms downloads Windows' own symbols from Microsoft (cached in\n"
-      "  %%LOCALAPPDATA%%\\waitwhy\\symbols); --symbols PATH uses a DbgHelp symbol path.\n"
-      "  Without it, _NT_SYMBOL_PATH is used when set.\n"
-      "  Exit codes: 0 report printed, 1 bad arguments or program not found,\n"
-      "  2 the kernel trace could not be started (not Administrator, or unavailable).\n");
+      "waitwhy %s - what is a program waiting for when it is slow but the CPU is idle?\n"
+      "\n"
+      "Usage:\n"
+      "  waitwhy [watch] (--pid N | --name program.exe) [options]\n"
+      "      Watch a running program, then report what its threads were waiting on.\n"
+      "      Needs an Administrator shell.\n"
+      "  waitwhy analyze FILE [report options]\n"
+      "      Report again from a FILE written by --dump-events, on any machine.\n"
+      "      (--from-dump FILE does the same.)\n"
+      "  waitwhy --help | --version\n"
+      "\n"
+      "Watch options:\n"
+      "  --seconds N          how long to watch (default 10)\n"
+      "  --dump-events FILE   also write every event of the program to FILE, and the names\n"
+      "                       the report uses; attach it to bug reports\n"
+      "  --symbols ms|PATH    ms: download Windows' own symbols from Microsoft (cached in\n"
+      "                       %%LOCALAPPDATA%%\\waitwhy\\symbols); PATH: a DbgHelp symbol\n"
+      "                       path. Without it, _NT_SYMBOL_PATH is used when set.\n"
+      "\n"
+      "Report options:\n"
+      "  --top N              show the N biggest groups of waits (default 6)\n"
+      "  --min-ms N           hide groups smaller than N milliseconds (default 10)\n"
+      "  --stall-ms N         report any single lock, disk, network or page-fault wait of\n"
+      "                       N ms or more (default 50)\n"
+      "\n"
+      "Exit codes: 0 report printed; 1 bad arguments, or the program or file was not\n"
+      "found; 2 the kernel trace could not be started (not Administrator, or unavailable).\n",
+      kVersion);
+}
+
+// Every error says what to do next (W30).
+int UsageError(const std::string& message) {
+  std::printf("%s\nRun 'waitwhy --help' to see the options.\n", message.c_str());
+  return kExitUsage;
 }
 
 }  // namespace
@@ -1010,50 +1029,95 @@ int wmain(int argc, wchar_t** argv) {
   std::wstring fromDump;
   int seconds = 10;
   ReportOptions shown;  // what the report shows: --top, --min-ms, --stall-ms
-  for (int i = 1; i < argc; ++i) {
-    std::wstring a = argv[i];
-    bool hasValue = i + 1 < argc;
-    if (a == L"--pid" && hasValue) {
-      pid = static_cast<uint32_t>(std::wcstoul(argv[++i], nullptr, 10));
-    } else if (a == L"--name" && hasValue) {
-      name = argv[++i];
-    } else if (a == L"--seconds" && hasValue) {
-      seconds = (std::max)(1, _wtoi(argv[++i]));
-    } else if (a == L"--top" && hasValue) {
-      shown.topN = static_cast<size_t>((std::max)(1, _wtoi(argv[++i])));
-    } else if (a == L"--min-ms" && hasValue) {
-      shown.minMs = (std::max)(0.0, std::wcstod(argv[++i], nullptr));
-    } else if (a == L"--stall-ms" && hasValue) {
-      shown.stallMs = (std::max)(0.0, std::wcstod(argv[++i], nullptr));
-    } else if (a == L"--dump-events" && hasValue) {
-      dumpPath = argv[++i];
-    } else if (a == L"--symbols" && hasValue) {
-      g_symbolsOption = argv[++i];
-    } else if (a == L"--from-dump" && hasValue) {
-      fromDump = argv[++i];
-    } else {
-      Usage();
-      return kExitUsage;
+  // Command line v1 (W30): an optional command first; without one it means watch.
+  int first = 1;
+  std::wstring command = argc > 1 ? argv[1] : L"";
+  if (command == L"--help" || command == L"-h" || command == L"/?" || command == L"help") {
+    Usage();
+    return kExitOk;
+  }
+  if (command == L"--version" || command == L"version") {
+    std::printf("waitwhy %s\n", kVersion);
+    return kExitOk;
+  }
+  if (command == L"watch") {
+    first = 2;
+  } else if (command == L"analyze") {
+    if (argc < 3 || argv[2][0] == L'-') return UsageError("waitwhy analyze needs the dump FILE to read.");
+    fromDump = argv[2];
+    first = 3;
+  } else if (command == L"record" || command == L"diff") {
+    return UsageError("'waitwhy " + Narrow(command) + "' is not available in this version.");
+  }
+  auto number = [](const wchar_t* text, double* value) {
+    wchar_t* end = nullptr;
+    *value = std::wcstod(text, &end);
+    return end != text && *end == L'\0' && *value >= 0;
+  };
+  for (int i = first; i < argc; ++i) {
+    const std::wstring a = argv[i];
+    const bool takesValue = a == L"--pid" || a == L"--name" || a == L"--seconds" || a == L"--top" ||
+                            a == L"--min-ms" || a == L"--stall-ms" || a == L"--dump-events" ||
+                            a == L"--symbols" || a == L"--from-dump";
+    if (!takesValue) {
+      if (a == L"--help" || a == L"-h") {
+        Usage();
+        return kExitOk;
+      }
+      return UsageError("Unknown option '" + Narrow(a) + "'.");
+    }
+    if (i + 1 >= argc) return UsageError("Option " + Narrow(a) + " needs a value.");
+    const wchar_t* value = argv[++i];
+    double n = 0;
+    const bool isNumber = number(value, &n);
+    if (a == L"--pid") {
+      if (!isNumber || n < 1 || n > 4294967295.0 || n != static_cast<double>(static_cast<uint32_t>(n)))
+        return UsageError("--pid needs a process ID, a whole number such as 1234.");
+      pid = static_cast<uint32_t>(n);
+    } else if (a == L"--name") {
+      name = value;
+    } else if (a == L"--seconds") {
+      if (!isNumber || n < 1) return UsageError("--seconds needs a whole number of seconds, 1 or more.");
+      seconds = static_cast<int>((std::min)(n, 86400.0));
+    } else if (a == L"--top") {
+      if (!isNumber || n < 1) return UsageError("--top needs a number, 1 or more.");
+      shown.topN = static_cast<size_t>(n);
+    } else if (a == L"--min-ms") {
+      if (!isNumber) return UsageError("--min-ms needs a number of milliseconds, 0 or more.");
+      shown.minMs = n;
+    } else if (a == L"--stall-ms") {
+      if (!isNumber) return UsageError("--stall-ms needs a number of milliseconds, 0 or more.");
+      shown.stallMs = n;
+    } else if (a == L"--dump-events") {
+      dumpPath = value;
+    } else if (a == L"--symbols") {
+      g_symbolsOption = value;
+    } else if (a == L"--from-dump") {
+      fromDump = value;
     }
   }
   if (!fromDump.empty()) {
-    if (pid != 0 || !name.empty() || !dumpPath.empty()) {
-      Usage();
-      return kExitUsage;
-    }
+    if (pid != 0 || !name.empty() || !dumpPath.empty())
+      return UsageError("A report from a dump takes no --pid, --name or --dump-events.");
     return ReportFromDump(fromDump, shown);
   }
+  if (pid != 0 && !name.empty()) return UsageError("Give either --pid or --name, not both.");
+  if (pid == 0 && name.empty())
+    return UsageError("Which program? Give its process ID with --pid N or its file name with --name.");
   if (!name.empty() && !FindProcessByName(name, &pid)) {
-    std::printf("No running process named %s.\n", Narrow(name).c_str());
-    return kExitUsage;
-  }
-  if (pid == 0) {
-    Usage();
+    std::printf("No running process is named %s. Check the name on the Details tab of Task Manager,\n"
+                "or give the process ID with --pid.\n",
+                Narrow(name).c_str());
     return kExitUsage;
   }
   HANDLE target = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
   if (!target) {
-    std::printf("Cannot open PID %u. Is it running, and are you running as Administrator?\n", pid);
+    if (GetLastError() == ERROR_ACCESS_DENIED)
+      std::printf("Access to PID %u was denied. Run waitwhy from an Administrator PowerShell window\n"
+                  "(right-click PowerShell > Run as administrator).\n",
+                  pid);
+    else
+      std::printf("No process with ID %u is running. Check the ID on the Details tab of Task Manager.\n", pid);
     return kExitUsage;
   }
   SnapshotThreads(pid);

@@ -61,6 +61,25 @@ jobs:
           .\decode_tests.exe docs\traces\buggy-64mb-events.txt
           if ($LASTEXITCODE -ne 0) { throw "decoding docs\traces\buggy-64mb-events.txt failed" }
 
+      # W30: the command line, without a kernel trace. analyze on the golden dump must print the
+      # golden report exactly.
+      - name: Command line
+        shell: pwsh
+        run: |
+          .\waitwhy.exe --version
+          if ($LASTEXITCODE -ne 0) { throw "--version did not exit with 0" }
+          .\waitwhy.exe --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "--help did not exit with 0" }
+          .\waitwhy.exe --no-such-option | Out-Null
+          if ($LASTEXITCODE -ne 1) { throw "an unknown option did not exit with 1" }
+          .\waitwhy.exe --pid abc | Out-Null
+          if ($LASTEXITCODE -ne 1) { throw "a bad --pid did not exit with 1" }
+          $out = & .\waitwhy.exe analyze tests\golden\slowapp-lock.events.txt 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0) { throw "analyze failed" }
+          $got = ($out.Substring($out.IndexOf('=====')) -replace "`r", '').TrimEnd()
+          $want = ((Get-Content tests\golden\slowapp-lock.report.txt -Raw) -replace "`r", '').Trim()
+          if ($got -ne $want) { Write-Host $out; throw "analyze does not print the golden report" }
+
       # C8 smoke test: waitwhy must report the lock bug in buggy slowapp and nothing in fixed
       # slowapp. GitHub's Windows runners run as Administrator, which kernel tracing needs.
       - name: Smoke test (buggy and fixed slowapp)

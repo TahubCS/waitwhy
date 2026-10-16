@@ -76,6 +76,7 @@ cl /nologo /W4 /WX /EHsc /O2 /Zi /std:c++17 waitwhy.cpp /Fe:waitwhy.exe
 
 ```powershell
 .\waitwhy.exe --pid 1234
-.\waitwhy.exe --name slowapp.exe --seconds 10 --top 8
+.\waitwhy.exe watch --name slowapp.exe --seconds 10 --top 8
+.\waitwhy.exe analyze dump.txt      # no Administrator needed
 .\run-demo.ps1
 ```

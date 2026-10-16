@@ -45,6 +45,8 @@ If your disk is very fast and the buggy numbers look small, start slowapp with m
 
 ## Use it on any program
 
+`waitwhy --help` lists every option and `waitwhy --version` prints the version. The first word may be a command: `watch` (the default, so it can be left out) or `analyze FILE`. Every error says what to do next.
+
 ```powershell
 .\waitwhy.exe --name notepad.exe --seconds 10
 .\waitwhy.exe --pid 1234 --top 10
@@ -62,7 +64,7 @@ To see the raw kernel events behind a report, add `--dump-events FILE`. It write
 To print the report again later, on any machine and without Administrator rights, give waitwhy the dump:
 
 ```powershell
-.\waitwhy.exe --from-dump dump.txt
+.\waitwhy.exe analyze dump.txt
 ```
 
 If the program exits while it is being watched, waitwhy still names its functions: the trace records every module the program had loaded, and waitwhy loads them from disk at the same addresses.
