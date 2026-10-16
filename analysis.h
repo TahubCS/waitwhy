@@ -174,8 +174,12 @@ struct ThreadState {
   uint64_t bornAt = 0;
   uint64_t endedAt = 0;
   std::vector<Interval> intervals;  // in the order they were recorded, not sorted
-  std::map<uint64_t, uint64_t> ioInFlight;  // its file I/O requests: IRP -> file object (W28)
-  uint64_t lastIoFileObject = 0;            // the file object of the latest of them
+  // Its file I/O requests in flight (W28): IRP -> file object and when it started.
+  struct Io {
+    uint64_t fileObject = 0;
+    uint64_t began = 0;
+  };
+  std::map<uint64_t, Io> ioInFlight;
 };
 
 // Wait durations on a log scale with four steps per doubling (W23), so a percentile is known to
@@ -338,7 +342,7 @@ class Analyzer {
         st.open.start = ts;
         st.open.reason = e.oldWaitReason;
         st.open.isWait = (e.oldState == kThreadStateWaiting);
-        if (st.open.isWait && !st.ioInFlight.empty()) st.open.fileObject = st.lastIoFileObject;
+        if (st.open.isWait) st.open.fileObject = FileObjectInFlight(st, e.ts, e.oldWaitReason);
         st.offCpu = true;
       }
     }
@@ -414,8 +418,7 @@ class Analyzer {
     if (e.op == FileIoEvent::Op::Begin) {
       if (!IsTarget(e.tid)) return false;
       ThreadState& st = threads[e.tid];
-      st.ioInFlight[e.irp] = e.fileObject;
-      st.lastIoFileObject = e.fileObject;
+      st.ioInFlight[e.irp] = ThreadState::Io{e.fileObject, e.ts};
       irpThread[e.irp] = e.tid;
       if (files.find(e.fileObject) == files.end()) {
         auto named = unclaimedNames.find(e.fileObject);
@@ -546,6 +549,25 @@ class Analyzer {
     if (w.wokenBy != kUnknownThread) b.wakers[w.wokenBy] += d;
   }
 
+  // The file object a thread that blocks now is waiting on (W28): the most recent of its
+  // requests still in flight. Not every request reports its completion, so requests older
+  // than kStaleIo are forgotten, and a thread that goes to sleep has none in flight at all.
+  static constexpr uint64_t kStaleIo = 50000000;  // 5 s of 10 MHz ticks
+  uint64_t FileObjectInFlight(ThreadState& st, uint64_t ts, int8_t reason) {
+    const bool sleeping = reason == 4 || reason == 11;  // DelayExecution, WrDelayExecution
+    uint64_t best = 0, bestBegan = 0;
+    for (auto it = st.ioInFlight.begin(); it != st.ioInFlight.end();) {
+      if (sleeping || ts > it->second.began + kStaleIo) {
+        irpThread.erase(it->first);
+        it = st.ioInFlight.erase(it);
+        continue;
+      }
+      if (!best || it->second.began >= bestBegan) best = it->second.fileObject, bestBegan = it->second.began;
+      ++it;
+    }
+    return best;
+  }
+
   // Keeps one interval of a thread's time for wait chains, while there is room.
   void Keep(ThreadState& st, Interval::Kind kind, uint64_t start, uint64_t end, uint64_t bucket = 0,
             uint32_t wokenBy = kUnknownThread) {
@@ -596,7 +618,7 @@ class Analyzer {
     st.endedAt = ts;
     for (auto& entry : st.awaitingStack) RecordWithoutStack(e.tid, st, entry.second);
     st.awaitingStack.clear();
-    for (const auto& [irp, fileObject] : st.ioInFlight) irpThread.erase(irp);
+    for (const auto& [irp, io] : st.ioInFlight) irpThread.erase(irp);
     st.ioInFlight.clear();
     st.offCpu = false;
     st.seen = true;

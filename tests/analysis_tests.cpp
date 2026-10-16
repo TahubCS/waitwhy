@@ -359,6 +359,39 @@ void CheckObjectClassification() {
   ExpectEq("later wait without the console", otherTicks, 40);
   ExpectStr("name taken over from the rundown", an.FileOf(0xF0) ? an.FileOf(0xF0)->path : "",
             "\\Device\\ConDrv\\Output");
+
+  // A request that never reports its completion must not stick to later waits (CI run #76).
+  Analyzer stale;
+  stale.pid = 1;
+  stale.targetThreads = {8};
+  FileIoEvent lost;
+  lost.op = FileIoEvent::Op::Begin;
+  lost.ts = 10;
+  lost.tid = 8;
+  lost.irp = 0x20;
+  lost.fileObject = 0xF1;
+  stale.OnFileIo(lost);
+  auto block = [&stale](uint64_t ts, int8_t reason) {
+    SwitchEvent s;
+    s.ts = ts;
+    s.oldTid = 8;
+    s.newTid = 0;
+    s.oldState = kThreadStateWaiting;
+    s.oldWaitReason = reason;
+    stale.OnSwitch(s);
+    s = SwitchEvent{};
+    s.ts = ts + 10;
+    s.oldTid = 0;
+    s.newTid = 8;
+    stale.OnSwitch(s);
+  };
+  block(20, 4);  // a sleep: nothing is in flight, and the lost request is forgotten
+  block(40, 0);  // a later wait
+  unsigned long long withObject = 0;
+  for (const auto& [key, b] : stale.buckets)
+    if (b.fileObject) withObject += b.count;
+  ExpectEq("waits given the lost request's file", withObject, 0);
+  ExpectEq("lost request forgotten", stale.threads.at(8).ioInFlight.size(), 0);
 }
 
 }  // namespace
