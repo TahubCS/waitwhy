@@ -156,6 +156,12 @@ struct Interval {
 // kept and the report says its wait chains are incomplete.
 constexpr size_t kMaxIntervals = size_t{1} << 20;
 
+// Upper limit on distinct waits (call stack, reason, file) kept per thread (W44). Past it, a
+// thread's new kinds of waits are kept together per wait reason, under the stack of the first
+// one, and the report says how much was grouped that way. Bounds memory on long captures.
+constexpr size_t kMaxBucketsPerThread = 4096;
+constexpr uint64_t kGroupedBucketMark = 0x9e3779b97f4a7c15ull;
+
 struct ThreadState {
   bool offCpu = false;  // `open` holds the period the thread is off the CPU right now
   OffCpu open;
@@ -285,6 +291,9 @@ class Analyzer {
   uint64_t unknownWakerTicks = 0;     // ... of which no waker was seen (W24)
   size_t intervalCount = 0;           // intervals kept, for all threads (W25)
   bool intervalsTruncated = false;    // kMaxIntervals was reached
+  std::unordered_map<uint32_t, size_t> bucketsPerThread;  // distinct waits per thread (W44)
+  uint64_t groupedWaits = 0;          // waits past kMaxBucketsPerThread, grouped by reason
+  uint64_t groupedTicks = 0;          // ... and their wait time
 
   // File objects the program's threads did I/O on, and their names once known (W28). Only
   // these are named, so the map stays as small as the program's own files.
@@ -554,11 +563,17 @@ class Analyzer {
     const uint64_t d = waitEnd > w.start ? waitEnd - w.start : 0;
     st.readyTicks += w.end > waitEnd ? w.end - waitEnd : 0;
     st.waitTicks += d;
-    const uint64_t hash = HashWait(w.reason, w.stack, w.fileObject);
+    uint64_t hash = HashWait(w.reason, w.stack, w.fileObject);
+    if (!buckets.count({tid, hash}) && bucketsPerThread[tid] >= kMaxBucketsPerThread) {
+      hash = HashWait(w.reason, {}, 0) ^ kGroupedBucketMark;  // W44: grouped by reason
+      ++groupedWaits;
+      groupedTicks += d;
+    }
     Keep(st, Interval::Waiting, w.start, waitEnd, hash, w.wokenBy);
     Keep(st, Interval::Ready, waitEnd, w.end);
     Bucket& b = buckets[{tid, hash}];
     if (b.count == 0) {
+      ++bucketsPerThread[tid];
       b.tid = tid;
       b.reason = w.reason;
       b.stack = w.stack;

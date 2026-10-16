@@ -486,6 +486,59 @@ void CheckWakerRefinesDisk() {
 }
 
 // W35: two JSON reports compared by activity; the thread name, not its ID, matches them.
+// W44: a thread with more different call stacks than kMaxBucketsPerThread keeps the rest
+// together by wait reason, and the report says so.
+void CheckBucketCap() {
+  std::printf("Distinct waits per thread are capped (W44)\n");
+  Analyzer an;
+  an.pid = 1;
+  an.targetThreads = {100};
+  an.stacksOn = true;
+  auto sw = [&](uint64_t ts, uint32_t oldTid, uint32_t newTid, int8_t state, int8_t reason) {
+    SwitchEvent e;
+    e.ts = ts;
+    e.oldTid = oldTid;
+    e.newTid = newTid;
+    e.oldState = state;
+    e.oldWaitReason = reason;
+    an.OnSwitch(e);
+  };
+  const size_t waits = kMaxBucketsPerThread + 10;
+  uint64_t ts = 1000;
+  sw(ts, 0, 100, 0, 0);  // first seen: the window-start wait (0 ticks) gets its own stack
+  StackEvent first;
+  first.ts = ts + 1;
+  first.eventTs = ts;
+  first.tid = 100;
+  first.userFrames = {0x4fff};
+  an.OnStack(first);
+  for (size_t i = 0; i + 1 < waits; ++i) {
+    sw(ts + 10, 100, 0, 5, 37);  // blocks on a lock for 10 ticks
+    sw(ts + 20, 0, 100, 0, 0);   // back on the CPU
+    StackEvent s;
+    s.ts = ts + 21;
+    s.eventTs = ts + 20;
+    s.tid = 100;
+    s.userFrames = {0x5000 + i};  // a different call stack each time
+    an.OnStack(s);
+    ts += 20;
+  }
+  an.FlushAtEnd();
+  // 1 window-start wait + (waits - 1) lock waits, each with its own stack.
+  ExpectEq("distinct waits kept", an.bucketsPerThread.at(100), kMaxBucketsPerThread + 1);
+  ExpectEq("waits grouped", an.groupedWaits, 10);
+  ExpectEq("their wait time", an.groupedTicks, 100);
+  uint64_t total = 0;
+  for (const auto& [key, b] : an.buckets) total += b.count;
+  ExpectEq("no wait lost", total, waits);
+  FakeSymbols sym;
+  ReportOptions opt;
+  opt.ticksPerSecond = 1000;
+  const Report r = BuildReport(an, sym, opt, [](uint32_t tid) { return "Thread " + std::to_string(tid); });
+  ExpectEq("report counts the grouped waits", r.quality.groupedWaits, 10);
+  ExpectEq("data quality line", RenderText(r).find("Grouped waits    : 10 waits") != std::string::npos, 1);
+}
+
 void CheckDiff() {
   std::printf("Comparing two reports (W35)\n");
   const std::string fixed = R"js({"schema": "waitwhy-report/1", "program": "slowapp.exe",
@@ -535,6 +588,7 @@ int main() {
   CheckObjectClassification();
   CheckWakerRefinesDisk();
   CheckDiff();
+  CheckBucketCap();
   std::printf(Failures() ? "%d check(s) failed.\n" : "All checks passed.\n", Failures());
   return Failures() ? 1 : 0;
 }

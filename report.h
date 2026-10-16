@@ -115,6 +115,8 @@ struct DataQuality {
   bool programNamed = true;   // the program's own module has a .pdb (or it is not known)
   std::string pdbNextToExe;   // set when a .pdb lies beside the program but was not used
   bool snapshotsOn = true;    // stack snapshots of threads blocked the whole window (W45)
+  uint64_t groupedWaits = 0;  // waits past the per-thread limit of distinct waits (W44)
+  double groupedSeconds = 0;
 };
 
 inline const char* LevelName(DataQuality::Level l) {
@@ -522,6 +524,10 @@ inline Report BuildReport(const Analyzer& an, const SymbolsFor& symbolsFor, cons
   if (q.wakerKnownPct >= 0 && q.wakerKnownPct < 90)
     lower(DataQuality::Level::Medium, "many wakers unknown");
   if (an.intervalsTruncated) lower(DataQuality::Level::Medium, "wait chains incomplete");
+  q.groupedWaits = an.groupedWaits;
+  q.groupedSeconds = static_cast<double>(an.groupedTicks) / opt.ticksPerSecond;
+  if (waitTicks && an.groupedTicks * 20 > waitTicks)  // over 5% of the wait time
+    lower(DataQuality::Level::Medium, "many different call stacks grouped");
   return r;
 }
 
@@ -635,6 +641,11 @@ inline std::string RenderQualityText(const Report& r) {
     Appendf(out, "  Wakers known     : %.0f%% of the time in waits that ended\n", q.wakerKnownPct);
   if (!q.snapshotsOn)
     Appendf(out, "  Stack snapshots  : not taken; threads blocked the whole window show no code location\n");
+  if (q.groupedWaits)
+    Appendf(out, "  Grouped waits    : %llu waits (%s) past %zu different call stacks in one thread,\n"
+                 "                     kept together by wait reason\n",
+            static_cast<unsigned long long>(q.groupedWaits), FormatDuration(q.groupedSeconds).c_str(),
+            kMaxBucketsPerThread);
   auto join = [](const std::vector<std::string>& names) {
     std::string text;
     for (size_t i = 0; i < names.size(); ++i) text += (i ? ", " : "") + names[i];
@@ -963,6 +974,7 @@ inline std::string RenderJson(const Report& r) {
   j.Close('}');
   j.Str("pdbNotUsed", q.pdbNextToExe);
   j.Bool("stackSnapshots", q.snapshotsOn);
+  j.Int("groupedWaits", q.groupedWaits);
   j.Close('}');
 
   j.Open('{', "counters");

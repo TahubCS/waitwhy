@@ -221,7 +221,8 @@
       "none": []
     },
     "pdbNotUsed": "",
-    "stackSnapshots": true
+    "stackSnapshots": true,
+    "groupedWaits": 0
   },
   "counters": {
     "contextSwitches": 12345,

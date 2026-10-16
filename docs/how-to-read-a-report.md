@@ -123,6 +123,10 @@ How far to trust the report:
 | medium | Under 95% of the wait time has a call stack; some events lost; or the waker of over 10% of the finished wait time is unknown |
 | high | None of the above |
 
+"Grouped waits" appears when one thread waited in more than 4096 different call stacks (a very
+long or very busy capture): the rest are kept together by wait reason so memory stays bounded,
+and the line says how much time that covers.
+
 "Stack snapshots: not taken" appears with `--no-suspend` and for `.etl` traces: a thread that was
 blocked for the whole window then shows no location in your code.
 
