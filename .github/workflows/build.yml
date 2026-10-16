@@ -235,7 +235,10 @@ jobs:
           & .\waitwhy.exe analyze fixed-events.txt --format json --out fixed.json | Out-Null
           & .\waitwhy.exe diff fixed.json buggy.json --fail-if-worse 10 | Out-Host
           if ($LASTEXITCODE -ne 3) { $failures += "diff: fixed -> buggy did not exit with 3 (got $LASTEXITCODE)." }
-          & .\waitwhy.exe diff buggy.json fixed.json --fail-if-worse 10 | Out-Host
+          # The other way the lock finding goes away. saver's disk share is the same activity in both
+          # runs but varies by about 10 points between two live runs on a CI runner (+11 in run #93),
+          # so this direction allows 30 points; the check above needs no margin, the finding is new.
+          & .\waitwhy.exe diff buggy.json fixed.json --fail-if-worse 30 | Out-Host
           if ($LASTEXITCODE -ne 0) { $failures += "diff: buggy -> fixed did not exit with 0 (got $LASTEXITCODE)." }
 
           # W28: the program's file I/O is traced and its files named; saver's file shows as the object.
