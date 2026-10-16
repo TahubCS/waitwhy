@@ -64,6 +64,12 @@ These define the product. They cannot be removed.
   before. Decided by the user (ROADMAP X5).
 - **D11. License.** waitwhy is released under the MIT license (`LICENSE`). Decided by the
   user (ROADMAP X9).
+- **D12. Analysis tools in CI.** CI may use third-party *tools* that are never linked into
+  waitwhy: sanitizers (ASan, UBSan) and libFuzzer through clang. D3 is about libraries in the
+  product and is unchanged. Decided by the user (ROADMAP X8).
+- **D13. Stack snapshots.** `watch` keeps taking one stack snapshot of threads blocked the
+  whole window, which pauses each such thread for a moment; `--no-suspend` turns it off, and
+  `record` never does it. Decided by the user (ROADMAP X10).
 
 ## Work items
 
@@ -186,6 +192,22 @@ approval before work begins; see the status log.
   on a trigger. Serves C1.
 - **W40. User documentation.** How to read a report, troubleshooting, FAQ, and one page per
   scenario. Serves C7.
+- **W41. Milestone E decisions.** Record D12 and D13 and the Milestone E work items. Serves C7.
+- **W42. Releases.** One version string, set from the release tag; `CHANGELOG.md`; a release
+  workflow that builds, tests and publishes a zip (exe, pdb, symbol DLLs, license, docs) with
+  SHA-256 sums and build provenance. Serves C7.
+- **W43. Overhead.** Measure how much watching and recording slow a program down, publish the
+  numbers, and size trace buffers from the CPU count. Serves C1, C6.
+- **W44. Long captures.** Bound the analysis's memory for long or busy captures: a cap on
+  distinct call stacks per thread, with the rest counted together and said in the data
+  quality. Serves C6.
+- **W45. `--no-suspend`.** D13: no stack snapshots that pause the program's threads. Serves C1.
+- **W46. Security hardening.** Control-flow guard and CET in the build, `SECURITY.md`, a threat
+  model, and sanitizer and fuzz runs of the readers of dumps, JSON reports and reports in CI
+  (D12). Serves C7.
+- **W47. `--redact`.** Leave user and machine names and folder paths out of every output, so
+  reports, dumps and exports can be shared. Serves C7.
+- **W48. Contributor docs.** `CONTRIBUTING.md` and issue templates. Serves C7.
 
 ## Status log
 
@@ -273,3 +295,6 @@ Newest line last. Format: `YYYY-MM-DD  ID  status  note`.
 - 2026-10-16  W38  confirmed  CI run #90: buggy slowapp recorded to buggy.etl; the report from the file alone (and with --name slowapp.exe) shows main's lock wait in update_frame released by saver, with call stacks.
 - 2026-10-16  W40  started  README starts with the question, a quick start of every command and links to the docs; "How it works" and limitations brought up to date. New docs/how-to-read-a-report.md (each section on the golden report, finding rules, confidence), docs/troubleshooting.md, docs/faq.md and docs/scenarios/ (one page per mode with its expected finding and CI check).
 - 2026-10-16  W39  confirmed  CI run #91 smoke step: the flight recorder, stopped by setting Local\waitwhy-ci, reported the last 5 s with main's lock wait in update_frame.
+- 2026-10-16  W40  confirmed  CI run #92: README, report guide, troubleshooting, FAQ and scenario pages in; build green.
+- 2026-10-16  D12, D13  decided by the user (ROADMAP X8, X10).
+- 2026-10-16  W41-W48  approved (Milestone E plan of 2026-10-16: releases, overhead, long captures, --no-suspend, security, --redact, contributor docs). Left for later: ARM64 (X6), winget/Scoop (R38), kernel stacks (R41), least privilege (X7, R34), Windows version matrix (R35).

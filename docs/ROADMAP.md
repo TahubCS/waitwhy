@@ -25,6 +25,11 @@ and approved the build-out plan. These R items now have W numbers:
 Still proposals: R18, R19, R30–R38, the GitHub Action wrapper half of R39, and R40–R42.
 Still open decisions: X6, X7, X8 and X10.
 
+**Update 2026-10-16, Milestone E.** The user decided X8 (D12: CI-only analysis tools) and X10
+(D13: snapshots on in `watch`, `--no-suspend`, never in `record`) and approved: R30 → W43,
+R31 → W44, R32 → W46 (with R18's sanitizers), R33 → W47, R36 → W45, R37 → W42, R42 → W48.
+Still proposals: R19, R34, R35, R38, R39's Action wrapper, R40, R41. Still open: X6, X7.
+
 ## 1. Where waitwhy stands
 
 ### What works (W1–W13, all in `main`)
