@@ -219,3 +219,5 @@ Newest line last. Format: `YYYY-MM-DD  ID  status  note`.
 - 2026-10-16  W15  started  analysis.h holds the state machine, stack matcher and buckets; waitwhy.cpp decodes into it. Replay test is portable and runs on Linux CI; tests/decode_tests.cpp replays through OnEvent on Windows.
 - 2026-10-16  W15  confirmed  CI run #61: replay counts unchanged through the analysis core and through OnEvent; smoke test passes; Linux job green.
 - 2026-10-16  W16  started  Classify, IsRuntimeFrame, YourCodeFrame, BlockedInFrame and TopWaker moved into analysis.h behind SymbolSource; tests/analysis_tests.cpp checks each rule.
+- 2026-10-16  W16  confirmed  CI run #62: unit tests pass on Windows and Linux; smoke test passes.
+- 2026-10-16  W17  started  /W4 /WX on every MSVC command in CI, run-demo.ps1 and CLAUDE.md; _wfopen replaced by _wfopen_s, explicit double conversions in the report.

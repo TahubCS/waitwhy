@@ -537,8 +537,9 @@ std::string WakerLabel(uint32_t tid) {
 
 void PrintReport(double ticksPerSecond, int topN, const SessionProps& stopped, bool stacksOn) {
   const Analyzer& an = g_analysis;
-  const double window = an.lastTs > an.firstTs ? (an.lastTs - an.firstTs) / ticksPerSecond : 0.0;
-  auto secs = [&](uint64_t ticks) { return ticks / ticksPerSecond; };
+  const double window =
+      an.lastTs > an.firstTs ? static_cast<double>(an.lastTs - an.firstTs) / ticksPerSecond : 0.0;
+  auto secs = [&](uint64_t ticks) { return static_cast<double>(ticks) / ticksPerSecond; };
   auto pct = [&](uint64_t ticks) { return window > 0 ? 100.0 * secs(ticks) / window : 0.0; };
 
   Symbolizer sym;
@@ -589,9 +590,9 @@ void PrintReport(double ticksPerSecond, int topN, const SessionProps& stopped, b
   if (buckets.empty()) std::printf("  No waits recorded. Is the program doing anything?\n");
   std::unordered_map<const Bucket*, Category> category;
   for (const Bucket* b : buckets) category[b] = Classify(*b, sym);
-  for (int i = 0; i < static_cast<int>(buckets.size()) && i < topN; ++i) {
+  for (size_t i = 0; i < buckets.size() && i < static_cast<size_t>(topN); ++i) {
     const Bucket& b = *buckets[i];
-    std::printf("\n  #%d  %s  waited %s (%.0f%% of the time) over %u wait(s)%s\n", i + 1,
+    std::printf("\n  #%zu  %s  waited %s (%.0f%% of the time) over %u wait(s)%s\n", i + 1,
                 ThreadLabel(b.tid).c_str(), FormatDuration(secs(b.ticks)).c_str(), pct(b.ticks),
                 b.count, b.stillWaitingAtEnd ? ", still waiting at the end" : "");
     std::printf("      Waiting on : %s\n", CategoryLabel(category[&b]));
@@ -716,7 +717,7 @@ int wmain(int argc, wchar_t** argv) {
   QueryPerformanceFrequency(&freq);
 
   if (!dumpPath.empty()) {
-    g_dump = _wfopen(dumpPath.c_str(), L"w");
+    if (_wfopen_s(&g_dump, dumpPath.c_str(), L"w") != 0) g_dump = nullptr;
     if (!g_dump) {
       std::printf("Cannot write the event dump to %s.\n", Narrow(dumpPath).c_str());
       CloseHandle(target);

@@ -8,6 +8,9 @@
 //   cl /nologo /EHsc /O2 /std:c++17 /DWAITWHY_NO_MAIN tests\decode_tests.cpp /Fe:decode_tests.exe
 //   .\decode_tests.exe docs\traces\buggy-64mb-events.txt
 
+#ifdef _MSC_VER
+#pragma warning(disable : 4505)  // waitwhy.cpp functions that only its own main uses
+#endif
 #include "../waitwhy.cpp"
 
 #include "dump_reader.h"

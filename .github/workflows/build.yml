@@ -20,15 +20,15 @@ jobs:
           Import-Module (Join-Path $vsPath 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll')
           Enter-VsDevShell -VsInstallPath $vsPath -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64' | Out-Null
 
-          cl /nologo /EHsc /Od /Zi /std:c++17 slowapp.cpp /Fe:slowapp.exe
+          cl /nologo /W4 /WX /EHsc /Od /Zi /std:c++17 slowapp.cpp /Fe:slowapp.exe
           if ($LASTEXITCODE -ne 0) { throw "slowapp.cpp did not compile" }
-          cl /nologo /EHsc /O2 /Zi /std:c++17 waitwhy.cpp /Fe:waitwhy.exe
+          cl /nologo /W4 /WX /EHsc /O2 /Zi /std:c++17 waitwhy.cpp /Fe:waitwhy.exe
           if ($LASTEXITCODE -ne 0) { throw "waitwhy.cpp did not compile" }
-          cl /nologo /EHsc /O2 /std:c++17 tests\replay_events.cpp /Fe:replay_events.exe
+          cl /nologo /W4 /WX /EHsc /O2 /std:c++17 tests\replay_events.cpp /Fe:replay_events.exe
           if ($LASTEXITCODE -ne 0) { throw "tests\replay_events.cpp did not compile" }
-          cl /nologo /EHsc /O2 /std:c++17 /DWAITWHY_NO_MAIN tests\decode_tests.cpp /Fe:decode_tests.exe
+          cl /nologo /W4 /WX /EHsc /O2 /std:c++17 /DWAITWHY_NO_MAIN tests\decode_tests.cpp /Fe:decode_tests.exe
           if ($LASTEXITCODE -ne 0) { throw "tests\decode_tests.cpp did not compile" }
-          cl /nologo /EHsc /O2 /std:c++17 tests\analysis_tests.cpp /Fe:analysis_tests.exe
+          cl /nologo /W4 /WX /EHsc /O2 /std:c++17 tests\analysis_tests.cpp /Fe:analysis_tests.exe
           if ($LASTEXITCODE -ne 0) { throw "tests\analysis_tests.cpp did not compile" }
 
       - name: Unit tests

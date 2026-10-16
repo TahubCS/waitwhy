@@ -58,8 +58,8 @@ From an x64 Developer PowerShell for Visual Studio (`run-demo.ps1` shows how to 
 with `vswhere` + `Enter-VsDevShell -DevCmdArguments '-arch=x64 -host_arch=x64'`):
 
 ```powershell
-cl /nologo /EHsc /Od /Zi /std:c++17 slowapp.cpp /Fe:slowapp.exe
-cl /nologo /EHsc /O2 /Zi /std:c++17 waitwhy.cpp /Fe:waitwhy.exe
+cl /nologo /W4 /WX /EHsc /Od /Zi /std:c++17 slowapp.cpp /Fe:slowapp.exe
+cl /nologo /W4 /WX /EHsc /O2 /Zi /std:c++17 waitwhy.cpp /Fe:waitwhy.exe
 ```
 
 - slowapp uses `/Od` so every function keeps its own frame; `/Zi` produces the `.pdb` that
