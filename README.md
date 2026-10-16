@@ -1,17 +1,47 @@
-# waitwhy demo
+# waitwhy
 
 **waitwhy** answers one question: *"My program is slow, but the CPU is idle. What is it waiting for?"*
 
 It watches a running Windows program for a few seconds and tells you, for each thread:
 
 - how much time it spent **running**, **waiting**, and **wanting the CPU** (ready but no free core)
-- **what** it was waiting on: a lock, the disk, the network, a sleep, or another thread
+- **what** it was waiting on: a lock, the disk (and which file), the network, the console, a pipe, a sleep, or another thread
 - **where** in your code it was stuck (function names from your program's `.pdb` file)
-- **who woke it up** again, which shows which thread was holding a lock
+- **who woke it up** again, and what that thread was doing meanwhile: "the lock was released by `saver`, which was waiting for the disk the whole time"
+
+It needs no changes to the program and no third-party libraries: it reads the Windows kernel's own event stream (ETW). MIT licensed.
+
+## Quick start
+
+From an Administrator PowerShell:
+
+| To | Run |
+|---|---|
+| Watch a running program for 10 s | `.\waitwhy.exe --name app.exe` (or `--pid 1234`) |
+| Watch it from its first instruction | `.\waitwhy.exe -- .\app.exe its arguments` |
+| Include the processes it starts | add `--children` |
+| Get one HTML page to share | add `--format html --out report.html` |
+| Get JSON for scripts | add `--format json` (or `--format json --out report.json`) |
+| Record now, report later or elsewhere | `.\waitwhy.exe record --name app.exe --out trace.etl`, then `.\waitwhy.exe analyze trace.etl` (no Administrator needed) |
+| Catch a rare hang | `.\waitwhy.exe record --name app.exe --ring 30 --trigger Local\waitwhy --out ring.etl` |
+| Fail CI when waiting got worse | `.\waitwhy.exe diff before.json after.json --fail-if-worse 10` |
+| Name Windows' own functions too | add `--symbols ms` |
+
+Build it with `cl /nologo /W4 /WX /EHsc /O2 /Zi /std:c++17 waitwhy.cpp /Fe:waitwhy.exe` from an x64 Developer PowerShell for Visual Studio.
+
+## Documentation
+
+- [How to read a report](docs/how-to-read-a-report.md): every section and line, with an example
+- [Troubleshooting](docs/troubleshooting.md): access denied, missing function names, lost events, antivirus, traces without stacks
+- [FAQ](docs/faq.md)
+- [Known-answer scenarios](docs/scenarios/README.md): one small program per kind of wait, and what waitwhy says about it
+- [Using `waitwhy diff` as a CI gate](docs/ci-gate.md), and the [JSON report schema](docs/report-schema.json)
+
+## Try it: the demo
 
 **slowapp** is a small test program with a deliberate bug: its `saver` thread holds a lock while it writes to disk, so the `main` thread keeps getting stuck waiting for that lock. `slowapp --fixed` moves the disk write outside the lock.
 
-## What you need
+### What you need
 
 | Requirement | Why |
 |---|---|
@@ -19,9 +49,9 @@ It watches a running Windows program for a few seconds and tells you, for each t
 | Visual Studio 2022, or the free "Build Tools for Visual Studio", with the **Desktop development with C++** workload | To compile the two `.cpp` files |
 | An **Administrator** PowerShell window | Reading kernel events requires admin rights |
 
-## Run the demo
+### Run the demo
 
-1. Put `slowapp.cpp`, `waitwhy.cpp` and `run-demo.ps1` in one folder.
+1. Get the whole repository (clone it, or download it as a zip): `waitwhy.cpp` needs the `.h` files beside it.
 2. Open PowerShell **as Administrator**, then `cd` into that folder.
 3. Run:
 
@@ -32,7 +62,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 The script finds the C++ compiler, builds both programs as 64-bit, starts the buggy slowapp in its own window, and runs waitwhy on it for 8 seconds. Press Enter afterwards to repeat the run with the fixed version.
 
-## What to look for
+### What to look for
 
 | | Buggy version | Fixed version |
 |---|---|---|
@@ -175,7 +205,7 @@ Scripts that read the text report may match these lines; prefer the JSON report.
 
 ## Known-answer scenarios
 
-`scenarios.exe --mode NAME` waits in one well-known way per mode, and CI checks that waitwhy names it: `condvar`, `coldread`, `console`, `pipe`, `socket`, `cpu`, `child`, `lockcpu`, `locksleep`, `lockdisk`, `sleep`. Build it like slowapp and try one:
+`scenarios.exe --mode NAME` waits in one well-known way per mode, and CI checks that waitwhy names it: `condvar`, `coldread`, `console`, `pipe`, `socket`, `cpu`, `child`, `lockcpu`, `locksleep`, `lockdisk`, `sleep`. [docs/scenarios](docs/scenarios/README.md) has a page for each. Build it like slowapp and try one:
 
 ```powershell
 cl /nologo /EHsc /Od /Zi /std:c++17 scenarios.cpp /Fe:scenarios.exe
@@ -185,10 +215,13 @@ Start-Process .\scenarios.exe -ArgumentList '--mode', 'lockcpu', '--seconds', '1
 
 ## How it works
 
-1. Starts a private Windows kernel trace session with these kinds of events: **context switch** (a thread stops or starts running on a CPU), **ready thread** (one thread wakes another), and **thread start**.
+1. Starts a private Windows kernel trace session with these kinds of events: **context switch** (a thread stops or starts running on a CPU), **ready thread** (one thread wakes another), **thread**, **process** and **image** (module load) events, and **file I/O** (which file object each request went to, and its name).
 2. Asks Windows to capture a **call stack** with every context switch.
-3. For each thread in the target program, measures every gap between "switched out because it is waiting" and "switched back in". The kernel also records the wait reason and the thread that woke it.
-4. Groups identical waits (same thread, same call stack), converts addresses to function names with DbgHelp, and labels each group in plain English from the function names (`FlushFileBuffers` means disk, `AcquireSRWLockExclusive` means lock, and so on).
+3. For each thread in the target program, measures every gap between "switched out because it is waiting" and "switched back in". The kernel also records the wait reason and the thread that woke it. Each thread keeps the intervals it spent running, waiting and ready.
+4. Converts addresses to function names with DbgHelp, from the modules the trace recorded, and labels each wait in plain English: from the file or device its I/O went to (a disk volume, the console, a pipe, a socket), from the thread that ended it, and from the function names (`FlushFileBuffers` means disk, `AcquireSRWLockExclusive` means lock, and so on).
+5. Groups the waits by thread, kind and function in your code, and for each wait another program thread ended, intersects that thread's intervals with the wait: the measured wait chain.
+
+The analysis and the report (`analysis.h`, `report.h`, `html.h`, `export.h`, `diff.h`) make no Windows calls, so they are tested on Linux too; `waitwhy.cpp` holds the Windows parts.
 
 ## Known limitations
 
@@ -199,4 +232,6 @@ Start-Process .\scenarios.exe -ArgumentList '--mode', 'lockcpu', '--seconds', '1
 | A thread blocked for the whole window never switches, so it produces no events | Its location comes from one snapshot of its stack, taken when the trace ends (the thread is paused for the moment that takes); its wait reason is shown as "not known" |
 | Wake-ups from hardware interrupts (a disk or network card finishing) | Shown as "the system" or "outside your program" instead of a specific cause |
 | Very busy machines generate huge numbers of events | Windows may drop some; waitwhy prints a warning when it does |
-| Category labels come from function-name keywords | Unusual libraries can end up labeled "something else" |
+| Category labels come from the file object, the waking thread and function-name keywords | Waits in unusual libraries without file I/O can end up labeled "something else" |
+| Function names need a `.pdb` | Managed (.NET, Java) and interpreted code show no names for their own frames; the category, blocking function and waker still show |
+| x64 only | ARM64 Windows is not supported yet |

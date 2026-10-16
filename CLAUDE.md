@@ -56,6 +56,8 @@ was stuck in (DbgHelp + .pdb); and which thread woke it up.
 | `.etl` traces | `waitwhy record --out FILE.etl` writes a kernel trace and `FILE.etl.waitwhy` (W38); `waitwhy analyze FILE.etl` reads it, or a WPR/xperf trace, through the same handlers. `record --ring N [--trigger NAME]` is the flight recorder (W39): a circular file, reported on when stopped. |
 | `html.h` | `--format html` (W36): the report as one self-contained HTML page with a timeline, call stacks and an off-CPU flame graph. No Win32 calls. |
 | `export.h` | `--export-chrome` and `--export-speedscope` (W37): the threads' timelines as Chrome trace JSON and speedscope profiles. No Win32 calls. |
+| `docs/how-to-read-a-report.md`, `docs/troubleshooting.md`, `docs/faq.md` | User documentation (W40). Keep them in step with the report's wording and the options. |
+| `docs/scenarios/` | One page per `scenarios.cpp` mode: what it does, what waitwhy reports, what CI checks (W40). |
 | `docs/ci-gate.md` | How to use `waitwhy diff` as a CI gate, with an example workflow. |
 | `docs/report-schema.json` | JSON Schema of `--format json` (W34), version `waitwhy-report/1`. |
 | `tests/check.h` | Check helpers shared by the tests. |
