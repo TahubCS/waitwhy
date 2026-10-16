@@ -53,7 +53,7 @@ was stuck in (DbgHelp + .pdb); and which thread woke it up.
 | `report.h` | Builds the report as plain data from the analysis and prints it as text; used by the live run and by `--from-dump`. No Win32 calls. |
 | `tests/golden_tests.cpp`, `tests/golden/` | Rebuilds reports from hand-written version 2 dumps and compares them byte for byte with the expected text and JSON reports. Portable. |
 | `diff.h` | `waitwhy diff` (W35): a small JSON reader and the comparison of two JSON reports by activity. No Win32 calls. |
-| `.etl` traces | `waitwhy record --out FILE.etl` writes a kernel trace and `FILE.etl.waitwhy` (W38); `waitwhy analyze FILE.etl` reads it, or a WPR/xperf trace, through the same handlers. |
+| `.etl` traces | `waitwhy record --out FILE.etl` writes a kernel trace and `FILE.etl.waitwhy` (W38); `waitwhy analyze FILE.etl` reads it, or a WPR/xperf trace, through the same handlers. `record --ring N [--trigger NAME]` is the flight recorder (W39): a circular file, reported on when stopped. |
 | `html.h` | `--format html` (W36): the report as one self-contained HTML page with a timeline, call stacks and an off-CPU flame graph. No Win32 calls. |
 | `export.h` | `--export-chrome` and `--export-speedscope` (W37): the threads' timelines as Chrome trace JSON and speedscope profiles. No Win32 calls. |
 | `docs/ci-gate.md` | How to use `waitwhy diff` as a CI gate, with an example workflow. |

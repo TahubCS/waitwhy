@@ -124,6 +124,18 @@ Two JSON reports can be compared, for example before and after a change: `waitwh
 
 `analyze` also reads traces from WPR or xperf that have context switches with call stacks (for example `wpr -start CPU`); give the program with `--pid N` or `--name X`. On another machine, function names in the program's own code need its `.pdb`: put the folder holding it in `--symbols`, e.g. `--symbols "C:\build;srv*C:\symbols*https://msdl.microsoft.com/download/symbols"`. A trace holds what every process on the machine did while it ran, so share it only where you would share that.
 
+## Flight recorder: the last seconds before a hang
+
+A hang that comes once an hour is hard to watch for. `waitwhy record --ring 30 --out ring.etl` keeps recording, but holds only the last 30 seconds, until it is stopped: by Ctrl+C, by the program's exit, or by a named event given with `--trigger`. Then it prints the report on those last 30 seconds (`--format json` and the exports work too), and `ring.etl` stays for `analyze`.
+
+```powershell
+.\waitwhy.exe record --name slowapp.exe --ring 30 --trigger Local\waitwhy --out ring.etl   # Administrator
+# when the program hangs, from the program itself (SetEvent) or from another PowerShell:
+[System.Threading.EventWaitHandle]::OpenExisting('Local\waitwhy').Set()
+```
+
+The circular file is 8 MB per second of `--ring` (at least 64 MB); on a very busy machine it may hold less than asked, which the report says. `--ring-mb` sets its size.
+
 ## One page to share: HTML
 
 `--format html --out report.html` writes the report as a single HTML page that opens in any browser, offline: the findings, each measured wait chain as a bar, a timeline of every thread (hover for what it was doing), the biggest waits with their call stacks, an off-CPU flame graph of where the threads waited, and the data-quality section. Everything is inline, so the file can be attached to a bug report. `analyze` makes the same page from a dump:

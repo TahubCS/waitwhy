@@ -707,6 +707,8 @@ void WINAPI OnTraceListEvent(PEVENT_RECORD ev) {
 // The session being used: a private system-logger session (W31, D10), or the shared
 // "NT Kernel Logger" where Windows cannot give one.
 std::wstring g_sessionName = kLoggerName;
+// waitwhy record --ring (W39): the size of the circular file, in MB; 0 for a file that grows.
+ULONG g_ringMb = 0;
 
 void FillProps(SessionProps& sp, bool forStart, bool privateSession = false, const std::wstring& logFile = L"") {
   std::memset(&sp, 0, sizeof sp);
@@ -723,7 +725,8 @@ void FillProps(SessionProps& sp, bool forStart, bool privateSession = false, con
       EVENT_TRACE_FLAG_FILE_IO | EVENT_TRACE_FLAG_FILE_IO_INIT;
   sp.props.LogFileMode = EVENT_TRACE_REAL_TIME_MODE;
   if (!logFile.empty()) {  // waitwhy record (W38): into a file instead
-    sp.props.LogFileMode = EVENT_TRACE_FILE_MODE_SEQUENTIAL;
+    sp.props.LogFileMode = g_ringMb ? EVENT_TRACE_FILE_MODE_CIRCULAR : EVENT_TRACE_FILE_MODE_SEQUENTIAL;
+    sp.props.MaximumFileSize = g_ringMb;
     sp.props.LogFileNameOffset = offsetof(SessionProps, logFile);
     wcsncpy_s(sp.logFile, logFile.c_str(), _TRUNCATE);
   }
@@ -1641,6 +1644,16 @@ void Usage() {
       "                       %%LOCALAPPDATA%%\\waitwhy\\symbols); PATH: a DbgHelp symbol\n"
       "                       path. Without it, _NT_SYMBOL_PATH is used when set.\n"
       "\n"
+      "Record options (waitwhy record):\n"
+      "  --out FILE.etl       the trace file to write\n"
+      "  --ring N             flight recorder: keep only the last N seconds, and print the\n"
+      "                       report on them when stopped by Ctrl+C, --trigger or the\n"
+      "                       program's exit (then --seconds is the longest it runs)\n"
+      "  --ring-mb N          size of the circular file (default 8 MB per second of --ring,\n"
+      "                       at least 64)\n"
+      "  --trigger NAME       stop when the named event NAME (e.g. Local\\waitwhy) is set,\n"
+      "                       by the program itself or by a script\n"
+      "\n"
       "Report options:\n"
       "  --format text|json|html\n"
       "                       the report as text (default), as JSON (its layout is\n"
@@ -1741,6 +1754,9 @@ int wmain(int argc, wchar_t** argv) {
   bool allInstances = false;  // --all (W33)
   std::vector<std::wstring> launch;  // W32: the program to start, after "--"
   bool recording = false;  // waitwhy record (W38)
+  double ringSeconds = 0;  // record --ring (W39): report on the last this many seconds
+  double ringMb = 0;       // record --ring-mb: the circular file's size
+  std::wstring triggerName;  // record --trigger: a named event that ends the recording
   ReportOptions shown;  // what the report shows: --top, --min-ms, --stall-ms
   // Command line v1 (W30): an optional command first; without one it means watch.
   int first = 1;
@@ -1780,7 +1796,8 @@ int wmain(int argc, wchar_t** argv) {
     const bool takesValue = a == L"--pid" || a == L"--name" || a == L"--seconds" || a == L"--top" ||
                             a == L"--min-ms" || a == L"--stall-ms" || a == L"--dump-events" ||
                             a == L"--symbols" || a == L"--from-dump" || a == L"--format" ||
-                            a == L"--out" || a == L"--export-chrome" || a == L"--export-speedscope";
+                            a == L"--out" || a == L"--export-chrome" || a == L"--export-speedscope" ||
+                            a == L"--ring" || a == L"--ring-mb" || a == L"--trigger";
     if (!takesValue) {
       if (a == L"--help" || a == L"-h") {
         Usage();
@@ -1837,19 +1854,38 @@ int wmain(int argc, wchar_t** argv) {
       g_output.chromeFile = value;
     } else if (a == L"--export-speedscope") {
       g_output.speedscopeFile = value;
+    } else if (a == L"--ring") {
+      if (!isNumber || n < 1) return UsageError("--ring needs a number of seconds, 1 or more.");
+      ringSeconds = (std::min)(n, 86400.0);
+    } else if (a == L"--ring-mb") {
+      if (!isNumber || n < 16) return UsageError("--ring-mb needs a size in MB, 16 or more.");
+      ringMb = (std::min)(n, 65536.0);
+    } else if (a == L"--trigger") {
+      triggerName = value;
     }
   }
   // waitwhy record (W38): the trace goes into the --out file; the report comes from analyze.
   std::wstring recordFile;
+  const bool ring = ringSeconds > 0;
+  if (!recording && (ring || ringMb > 0 || !triggerName.empty()))
+    return UsageError("--ring, --ring-mb and --trigger are for: waitwhy record --ring SECONDS --out FILE.etl");
+  if (!ring && (ringMb > 0 || !triggerName.empty()))
+    return UsageError("--ring-mb and --trigger need --ring SECONDS.");
   if (recording) {
     if (g_output.file.empty()) return UsageError("waitwhy record needs --out FILE.etl, the file to record into.");
-    if (g_output.json || g_output.html || !g_output.chromeFile.empty() || !g_output.speedscopeFile.empty() ||
-        !dumpPath.empty() || !fromDump.empty())
+    // A flight recording (W39) ends with its report, so it takes the report options; a plain
+    // recording is reported on later.
+    if (!ring && (g_output.json || g_output.html || !g_output.chromeFile.empty() || !g_output.speedscopeFile.empty()))
       return UsageError("waitwhy record only records. Give report options to: waitwhy analyze FILE.etl");
+    if (g_output.html) return UsageError("A flight recording prints its report; for HTML, run: waitwhy analyze FILE.etl --format html --out FILE.html");
+    if (!dumpPath.empty() || !fromDump.empty())
+      return UsageError("waitwhy record takes no --dump-events or --from-dump.");
     std::error_code ec;
     recordFile = std::filesystem::absolute(std::filesystem::path(g_output.file), ec).wstring();
     if (ec || !IsTraceFile(recordFile)) return UsageError("waitwhy record --out needs a file name ending in .etl.");
     g_output.file.clear();
+    // About 8 MB per second of a busy machine's context switches with their stacks.
+    if (ring) g_ringMb = static_cast<ULONG>(ringMb > 0 ? ringMb : (std::max)(64.0, (std::min)(4096.0, ringSeconds * 8)));
   }
   KeepConsoleForJson();
   if (!fromDump.empty() && IsTraceFile(fromDump)) {
@@ -1903,6 +1939,17 @@ int wmain(int argc, wchar_t** argv) {
     }
     pid = launched.dwProcessId;
     if (!secondsGiven) seconds = 86400;
+  }
+  // A flight recording runs until it is stopped: Ctrl+C, the trigger, or the program's exit.
+  if (ring && !secondsGiven) seconds = 86400 * 7;
+  HANDLE trigger = nullptr;
+  if (!triggerName.empty()) {
+    trigger = CreateEventW(nullptr, TRUE, FALSE, triggerName.c_str());
+    if (!trigger) {
+      std::printf("Cannot create the event %s (error %lu). Use a name such as Local\\waitwhy.\n",
+                  Narrow(triggerName).c_str(), GetLastError());
+      return kExitUsage;
+    }
   }
   // A launched program that never ran is ended again when watching cannot start.
   auto abandonLaunch = [&launched] {
@@ -2011,6 +2058,11 @@ int wmain(int argc, wchar_t** argv) {
       std::printf("Started %s (PID %u); %s it for %d seconds", Narrow(launch[0]).c_str(), pid, verb, seconds);
     else
       std::printf("Started %s (PID %u); %s it until it exits (Ctrl+C stops)", Narrow(launch[0]).c_str(), pid, verb);
+  } else if (ring) {
+    std::printf("Recording PID %u (%zu threads), keeping the last %s, until Ctrl+C%s%s%s", pid,
+                g_analysis.targetThreads.size(), FormatDuration(ringSeconds).c_str(),
+                trigger ? ", the event " : "", trigger ? Narrow(triggerName).c_str() : "",
+                " or the program's exit");
   } else {
     std::printf("%s PID %u (%zu threads) for %d seconds", recording ? "Recording" : "Watching", pid,
                 g_analysis.targetThreads.size(), seconds);
@@ -2028,7 +2080,7 @@ int wmain(int argc, wchar_t** argv) {
     const auto t = static_cast<uint64_t>(now.QuadPart);
     if (t >= deadline || g_stopRequested) break;
     if (t >= nextDot) {
-      std::printf(".");
+      if (!ring) std::printf(".");
       std::fflush(stdout);
       nextDot += static_cast<uint64_t>(freq.QuadPart);
       rememberThreadNames();
@@ -2036,9 +2088,15 @@ int wmain(int argc, wchar_t** argv) {
     const uint64_t untilMs = (std::min)(deadline, nextDot) - t;
     const auto waitMs = static_cast<DWORD>((std::min)(
         uint64_t{100}, untilMs * 1000 / static_cast<uint64_t>(freq.QuadPart)));
-    if (WaitForSingleObject(target, waitMs) == WAIT_OBJECT_0) {
+    const HANDLE handles[2] = {target, trigger};
+    const DWORD signalled = WaitForMultipleObjects(trigger ? 2 : 1, handles, FALSE, waitMs);
+    if (signalled == WAIT_OBJECT_0) {
       std::printf("\nThe program exited while being watched.");
       programExited = true;
+      break;
+    }
+    if (signalled == WAIT_OBJECT_0 + 1) {
+      std::printf("\n%s was set.", Narrow(triggerName).c_str());
       break;
     }
   }
@@ -2056,6 +2114,22 @@ int wmain(int argc, wchar_t** argv) {
   if (launched.hProcess && !programExited)
     std::printf("Note: %s is still running; waitwhy leaves it running.\n", Narrow(launch[0]).c_str());
   CloseHandle(target);
+  if (trigger) CloseHandle(trigger);
+  if (ring) {
+    // The flight recorder's report covers its last --ring seconds (W39).
+    const uint64_t keep = static_cast<uint64_t>(ringSeconds * static_cast<double>(freq.QuadPart));
+    const uint64_t from = g_analysis.lastTs - g_analysis.firstTs > keep ? g_analysis.lastTs - keep : g_analysis.firstTs;
+    if (!WriteRecordInfo(recordFile, from, g_analysis.lastTs)) {
+      std::printf("Cannot write %s.\n", Narrow(RecordInfoPath(recordFile)).c_str());
+      return kExitUsage;
+    }
+    std::printf("Recorded to %s (%lu events lost); the report covers the last %s.\n", Narrow(recordFile).c_str(),
+                stopped.props.EventsLost,
+                FormatDuration(static_cast<double>(g_analysis.lastTs - from) / static_cast<double>(freq.QuadPart)).c_str());
+    std::printf("For the same report as HTML: waitwhy analyze %s --format html --out report.html\n",
+                Narrow(recordFile).c_str());
+    return AnalyzeTraceFile(recordFile, shown, 0, L"", false);
+  }
   if (recording) {
     const bool infoWritten = WriteRecordInfo(recordFile, g_analysis.firstTs, g_analysis.lastTs);
     std::error_code ec;
