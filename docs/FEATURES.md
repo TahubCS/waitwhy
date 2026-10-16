@@ -258,3 +258,5 @@ Newest line last. Format: `YYYY-MM-DD  ID  status  note`.
 - 2026-10-16  W31  confirmed  CI run #80: no fallback note; a logman "NT Kernel Logger" session kept running through all smoke runs; scenarios pass on the private session.
 - 2026-10-16  W32  confirmed  CI run #83: launched slowapp watched from its start until it exited, main's lock wait in update_frame found as "Thread N (main, exited)".
 - 2026-10-16  W28  confirmed  CI run #83: console output no longer "the disk"; the pipe client "waiting for another thread"; saver's file named in the buggy run.
+- 2026-10-16  W34  started  --format json and --out FILE from the report model; schema docs/report-schema.json (waitwhy-report/1); console JSON alone on stdout; golden JSON test; CI parses the buggy run's JSON.
+- 2026-10-16  W33  confirmed  CI run #84: scenario child with --children reports the child processes in the header and their threads as [PID N]; all other checks pass.

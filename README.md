@@ -102,10 +102,19 @@ Every report ends with a "Data quality" section and an overall confidence:
 
 It also says which modules had full function names (from a `.pdb`) and which only exported names. Windows' own DLLs usually have only exported names, so a name like `ntdll!RtlSleepConditionVariableSRW` may really be a different function nearby.
 
+## Reports for scripts: JSON
+
+`--format json` prints the same report as JSON, laid out as described in `docs/report-schema.json` (`"schema": "waitwhy-report/1"`); `--out FILE` writes it to a file. When JSON goes to the console, every other line waitwhy prints goes to stderr, so the output can be parsed directly:
+
+```powershell
+$report = .\waitwhy.exe --name slowapp.exe --seconds 5 --format json | ConvertFrom-Json
+$report.findings | Where-Object category -eq 'lock'
+```
+
 ## Report lines scripts can rely on
 
-CI and scripts may match these lines of the text report. They stay as they are until a
-machine-readable report exists (W34); `tests/golden/` holds a complete expected report.
+Scripts that read the text report may match these lines; prefer the JSON report.
+`tests/golden/` holds a complete expected report in both forms.
 
 | Line | Example |
 |---|---|

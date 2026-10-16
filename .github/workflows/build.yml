@@ -148,6 +148,13 @@ jobs:
           }
           if ($buggy -match 'using the shared') { $failures += 'W31: waitwhy did not get a private trace session.' }
 
+          # W34: the JSON report, parsed as a script would.
+          $json = (& .\waitwhy.exe analyze buggy-events.txt --format json 2>$null | Out-String) | ConvertFrom-Json
+          if ($json.schema -ne 'waitwhy-report/1' -or
+              -not ($json.findings | Where-Object { $_.category -eq 'lock' -and $_.yourCode -match 'update_frame' -and $_.chain.waker -match 'saver' })) {
+            $failures += 'JSON report: no lock finding in update_frame with a chain to saver.'
+          }
+
           # W28: the program's file I/O is traced and its files named; saver's file shows as the object.
           $buggyDump = Get-Content buggy-events.txt -Raw
           $fileIoLines = ([regex]::Matches($buggyDump, '(?m)^FILEIO ')).Count

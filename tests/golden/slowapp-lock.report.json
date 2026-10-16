@@ -1,0 +1,231 @@
+{
+  "schema": "waitwhy-report/1",
+  "program": "slowapp.exe",
+  "pid": 7,
+  "otherProcesses": 0,
+  "windowSeconds": 10,
+  "warnings": [],
+  "threads": [
+    {
+      "tid": 3,
+      "label": "Thread 3 (ticker)",
+      "runningPct": 0.03,
+      "waitingPct": 99.97,
+      "readyPct": 0
+    },
+    {
+      "tid": 2,
+      "label": "Thread 2 (saver)",
+      "runningPct": 0.08,
+      "waitingPct": 99.92,
+      "readyPct": 0
+    },
+    {
+      "tid": 1,
+      "label": "Thread 1 (main)",
+      "runningPct": 0.11,
+      "waitingPct": 99.89,
+      "readyPct": 0
+    }
+  ],
+  "idleThreads": [
+    4
+  ],
+  "unseenThreads": 0,
+  "waits": [
+    {
+      "tid": 3,
+      "thread": "Thread 3 (ticker)",
+      "seconds": 9.997,
+      "pct": 99.97,
+      "count": 2,
+      "stillWaitingAtEnd": true,
+      "longestSeconds": 5,
+      "p95Seconds": null,
+      "category": "sleep",
+      "categoryLabel": "an intentional sleep or timer",
+      "yourCode": "slowapp!`anonymous namespace'::ticker_thread",
+      "blockedIn": [
+        {
+          "function": "KERNELBASE!SleepEx",
+          "pct": 100
+        }
+      ],
+      "objects": [],
+      "wokenBy": "the system (a timer or finished I/O)",
+      "waitReason": {
+        "code": 4,
+        "name": "DelayExecution"
+      }
+    },
+    {
+      "tid": 2,
+      "thread": "Thread 2 (saver)",
+      "seconds": 6.99,
+      "pct": 69.9,
+      "count": 1,
+      "stillWaitingAtEnd": true,
+      "longestSeconds": 6.99,
+      "p95Seconds": null,
+      "category": "sleep",
+      "categoryLabel": "an intentional sleep or timer",
+      "yourCode": "slowapp!`anonymous namespace'::saver_thread",
+      "blockedIn": [
+        {
+          "function": "KERNELBASE!SleepEx",
+          "pct": 100
+        }
+      ],
+      "objects": [],
+      "wokenBy": "unknown",
+      "waitReason": {
+        "code": 4,
+        "name": "DelayExecution"
+      }
+    },
+    {
+      "tid": 1,
+      "thread": "Thread 1 (main)",
+      "seconds": 6.98,
+      "pct": 69.8,
+      "count": 1,
+      "stillWaitingAtEnd": true,
+      "longestSeconds": 6.98,
+      "p95Seconds": null,
+      "category": "sleep",
+      "categoryLabel": "an intentional sleep or timer",
+      "yourCode": "slowapp!main",
+      "blockedIn": [
+        {
+          "function": "KERNELBASE!SleepEx",
+          "pct": 100
+        }
+      ],
+      "objects": [],
+      "wokenBy": "unknown",
+      "waitReason": {
+        "code": 4,
+        "name": "DelayExecution"
+      }
+    },
+    {
+      "tid": 1,
+      "thread": "Thread 1 (main)",
+      "seconds": 3.009,
+      "pct": 30.09,
+      "count": 1,
+      "stillWaitingAtEnd": false,
+      "longestSeconds": 3.009,
+      "p95Seconds": null,
+      "category": "lock",
+      "categoryLabel": "a lock held by another thread",
+      "yourCode": "slowapp!`anonymous namespace'::update_frame",
+      "blockedIn": [
+        {
+          "function": "ntdll!RtlSleepConditionVariableSRW",
+          "pct": 100
+        }
+      ],
+      "objects": [],
+      "wokenBy": "Thread 2 (saver)",
+      "waitReason": {
+        "code": 37,
+        "name": "WrAlertByThreadId"
+      }
+    },
+    {
+      "tid": 2,
+      "thread": "Thread 2 (saver)",
+      "seconds": 3,
+      "pct": 30,
+      "count": 2,
+      "stillWaitingAtEnd": false,
+      "longestSeconds": 2.8,
+      "p95Seconds": null,
+      "category": "disk",
+      "categoryLabel": "the disk (file read/write/flush)",
+      "yourCode": "slowapp!`anonymous namespace'::write_settings_to_disk",
+      "blockedIn": [
+        {
+          "function": "KERNELBASE!WriteFile",
+          "pct": 93.3333
+        },
+        {
+          "function": "KERNELBASE!FlushFileBuffers",
+          "pct": 6.66667
+        }
+      ],
+      "objects": [],
+      "wokenBy": "the system (a timer or finished I/O)",
+      "waitReason": {
+        "code": 0,
+        "name": "Executive"
+      }
+    }
+  ],
+  "hiddenWaitRows": 1,
+  "hiddenWaitSeconds": 0.002,
+  "findings": [
+    {
+      "kind": "wait",
+      "tid": 2,
+      "thread": "Thread 2 (saver)",
+      "pct": 30,
+      "category": "disk",
+      "yourCode": "slowapp!`anonymous namespace'::write_settings_to_disk",
+      "longestSeconds": 2.8,
+      "longWait": true,
+      "onlyLongWait": false
+    },
+    {
+      "kind": "wait",
+      "tid": 1,
+      "thread": "Thread 1 (main)",
+      "pct": 30.09,
+      "category": "lock",
+      "yourCode": "slowapp!`anonymous namespace'::update_frame",
+      "longestSeconds": 3.009,
+      "longWait": true,
+      "onlyLongWait": false,
+      "chain": {
+        "waker": "Thread 2 (saver)",
+        "seconds": 3.009,
+        "parts": [
+          {
+            "kind": "waiting",
+            "category": "disk",
+            "yourCode": "slowapp!`anonymous namespace'::write_settings_to_disk",
+            "seconds": 2.999,
+            "pct": 99.6677
+          }
+        ]
+      }
+    }
+  ],
+  "dataQuality": {
+    "confidence": "high",
+    "reasons": [],
+    "eventsLost": 0,
+    "buffersLost": 0,
+    "stackPct": 100,
+    "wakerKnownPct": 100,
+    "modules": {
+      "full": [
+        "slowapp"
+      ],
+      "exportsOnly": [
+        "KERNELBASE",
+        "kernel32",
+        "ntdll"
+      ],
+      "none": []
+    },
+    "pdbNotUsed": ""
+  },
+  "counters": {
+    "contextSwitches": 12345,
+    "waitsWithStack": 5,
+    "waitsWithoutStack": 0,
+    "kernelOnlyStackParts": 1
+  }
+}

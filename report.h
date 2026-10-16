@@ -723,6 +723,241 @@ inline std::string RenderText(const Report& r) {
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// JSON (W34): the same report as data, for scripts and CI. The layout is described by
+// docs/report-schema.json; "schema" names its version, which changes only with that file.
+// ---------------------------------------------------------------------------
+
+constexpr char kReportSchema[] = "waitwhy-report/1";
+
+inline const char* CategoryKey(Category c) {
+  switch (c) {
+    case Category::Lock: return "lock";
+    case Category::Disk: return "disk";
+    case Category::Network: return "network";
+    case Category::Sleep: return "sleep";
+    case Category::OtherThread: return "otherThread";
+    case Category::PageFault: return "pageFault";
+    default: return "other";
+  }
+}
+
+inline std::string JsonString(const std::string& text) {
+  std::string out = "\"";
+  for (char c : text) {
+    const auto ch = static_cast<unsigned char>(c);
+    if (ch == '"' || ch == '\\') {
+      out += '\\';
+      out += static_cast<char>(ch);
+    } else if (ch < 0x20) {
+      Appendf(out, "\\u%04x", ch);
+    } else {
+      out += static_cast<char>(ch);
+    }
+  }
+  return out + "\"";
+}
+
+inline std::string JsonNumber(double v) {
+  std::string out;
+  Appendf(out, "%.6g", v);
+  return out;
+}
+
+// A small JSON writer: one key per line, two spaces per level.
+class JsonWriter {
+ public:
+  void Open(char bracket, const char* key = nullptr) {
+    Item(key);
+    out_ += bracket;
+    first_.push_back(true);
+  }
+  void Close(char bracket) {
+    const bool empty = first_.back();
+    first_.pop_back();
+    if (!empty) {
+      out_ += '\n';
+      Indent();
+    }
+    out_ += bracket;
+  }
+  void Value(const char* key, const std::string& raw) {
+    Item(key);
+    out_ += raw;
+  }
+  void Str(const char* key, const std::string& v) { Value(key, JsonString(v)); }
+  void Num(const char* key, double v) { Value(key, JsonNumber(v)); }
+  void Int(const char* key, unsigned long long v) { Value(key, std::to_string(v)); }
+  void Bool(const char* key, bool v) { Value(key, v ? "true" : "false"); }
+  std::string Done() { return out_ + "\n"; }
+
+ private:
+  void Indent() { out_.append(first_.size() * 2, ' '); }
+  void Item(const char* key) {
+    if (!first_.empty()) {
+      out_ += first_.back() ? "\n" : ",\n";
+      first_.back() = false;
+      Indent();
+    }
+    if (key) out_ += JsonString(key) + ": ";
+  }
+  std::string out_;
+  std::vector<bool> first_;
+};
+
+inline std::string RenderJson(const Report& r) {
+  JsonWriter j;
+  j.Open('{');
+  j.Str("schema", kReportSchema);
+  j.Str("program", r.program);
+  j.Int("pid", r.pid);
+  j.Int("otherProcesses", r.otherProcesses);
+  j.Num("windowSeconds", r.windowSeconds);
+  j.Open('[', "warnings");
+  for (const std::string& w : r.warnings) j.Str(nullptr, w);
+  j.Close(']');
+
+  j.Open('[', "threads");
+  for (const ThreadRow& t : r.threads) {
+    j.Open('{');
+    j.Int("tid", t.tid);
+    j.Str("label", t.label);
+    j.Num("runningPct", t.runningPct);
+    j.Num("waitingPct", t.waitingPct);
+    j.Num("readyPct", t.readyPct);
+    j.Close('}');
+  }
+  j.Close(']');
+  j.Open('[', "idleThreads");
+  for (uint32_t tid : r.idleThreads) j.Int(nullptr, tid);
+  j.Close(']');
+  j.Int("unseenThreads", static_cast<unsigned long long>(r.unseenThreads));
+
+  j.Open('[', "waits");
+  for (const WaitRow& w : r.waits) {
+    j.Open('{');
+    j.Int("tid", w.tid);
+    j.Str("thread", w.thread);
+    j.Num("seconds", w.seconds);
+    j.Num("pct", w.pct);
+    j.Int("count", w.count);
+    j.Bool("stillWaitingAtEnd", w.stillWaitingAtEnd);
+    j.Num("longestSeconds", w.longestSeconds);
+    if (w.p95Seconds >= 0) j.Num("p95Seconds", w.p95Seconds);
+    else j.Value("p95Seconds", "null");
+    j.Str("category", CategoryKey(w.category));
+    j.Str("categoryLabel", CategoryLabel(w.category));
+    j.Str("yourCode", w.yourCode);
+    j.Open('[', "blockedIn");
+    for (const auto& [fn, pct] : w.blockedIn) {
+      j.Open('{');
+      j.Str("function", fn);
+      j.Num("pct", pct);
+      j.Close('}');
+    }
+    j.Close(']');
+    j.Open('[', "objects");
+    for (const auto& [object, pct] : w.objects) {
+      j.Open('{');
+      j.Str("object", object);
+      j.Num("pct", pct);
+      j.Close('}');
+    }
+    j.Close(']');
+    j.Str("wokenBy", w.wokenBy);
+    if (w.reason == kReasonUnknown) {
+      j.Value("waitReason", "null");
+    } else {
+      j.Open('{', "waitReason");
+      j.Int("code", static_cast<unsigned long long>(w.reason));
+      j.Str("name", WaitReasonName(w.reason));
+      j.Close('}');
+    }
+    j.Close('}');
+  }
+  j.Close(']');
+  j.Int("hiddenWaitRows", r.hiddenWaitRows);
+  j.Num("hiddenWaitSeconds", r.hiddenWaitSeconds);
+
+  j.Open('[', "findings");
+  for (const Finding& f : r.findings) {
+    j.Open('{');
+    j.Str("kind", f.kind == Finding::Kind::CpuCompetition ? "cpuCompetition" : "wait");
+    j.Int("tid", f.tid);
+    j.Str("thread", f.thread);
+    j.Num("pct", f.pct);
+    if (f.kind == Finding::Kind::Wait) {
+      j.Str("category", CategoryKey(f.category));
+      j.Str("yourCode", f.yourCode);
+      j.Num("longestSeconds", f.longestSeconds);
+      j.Bool("longWait", f.longWait);
+      j.Bool("onlyLongWait", f.onlyLongWait);
+      if (!f.chain.empty()) {
+        j.Open('{', "chain");
+        j.Str("waker", f.waker);
+        j.Num("seconds", f.chainSeconds);
+        j.Open('[', "parts");
+        for (const ChainPart& p : f.chain) {
+          j.Open('{');
+          j.Str("kind", p.kind == ChainPart::Kind::Running   ? "running"
+                        : p.kind == ChainPart::Kind::Ready   ? "ready"
+                        : p.kind == ChainPart::Kind::NotSeen ? "notSeen"
+                                                             : "waiting");
+          if (p.kind == ChainPart::Kind::Waiting) {
+            j.Str("category", CategoryKey(p.category));
+            j.Str("yourCode", p.yourCode);
+          }
+          j.Num("seconds", p.seconds);
+          j.Num("pct", p.pct);
+          j.Close('}');
+        }
+        j.Close(']');
+        j.Close('}');
+      } else if (f.hasReleaser) {
+        j.Open('{', "releaser");
+        j.Str("thread", f.releaser);
+        j.Str("category", CategoryKey(f.releaserCategory));
+        j.Str("yourCode", f.releaserCode);
+        j.Close('}');
+      }
+    }
+    j.Close('}');
+  }
+  j.Close(']');
+
+  const DataQuality& q = r.quality;
+  j.Open('{', "dataQuality");
+  j.Str("confidence", LevelName(q.confidence));
+  j.Open('[', "reasons");
+  for (const std::string& why : q.reasons) j.Str(nullptr, why);
+  j.Close(']');
+  j.Int("eventsLost", q.eventsLost);
+  j.Int("buffersLost", q.buffersLost);
+  j.Num("stackPct", q.stackPct);
+  if (q.wakerKnownPct >= 0) j.Num("wakerKnownPct", q.wakerKnownPct);
+  else j.Value("wakerKnownPct", "null");
+  j.Open('{', "modules");
+  for (const auto& [key, list] : {std::make_pair("full", &q.fullModules),
+                                  std::make_pair("exportsOnly", &q.exportModules),
+                                  std::make_pair("none", &q.unnamedModules)}) {
+    j.Open('[', key);
+    for (const std::string& m : *list) j.Str(nullptr, m);
+    j.Close(']');
+  }
+  j.Close('}');
+  j.Str("pdbNotUsed", q.pdbNextToExe);
+  j.Close('}');
+
+  j.Open('{', "counters");
+  j.Int("contextSwitches", r.contextSwitches);
+  j.Int("waitsWithStack", r.waitsWithStack);
+  j.Int("waitsWithoutStack", r.waitsWithoutStack);
+  j.Int("kernelOnlyStackParts", r.kernelOnlyFragments);
+  j.Close('}');
+  j.Close('}');
+  return j.Done();
+}
+
 }  // namespace waitwhy
 
 #endif  // WAITWHY_REPORT_H

@@ -33,6 +33,7 @@
 #include <evntrace.h>
 #include <evntcons.h>
 #include <tlhelp32.h>
+#include <io.h>
 #include <dbghelp.h>
 #include <tdh.h>
 // clang-format on
@@ -1147,6 +1148,44 @@ void WriteDumpNames(FILE* out, const SymbolizerFor& symbolsFor, bool symbolsOk, 
 // Report
 // ---------------------------------------------------------------------------
 
+// --format and --out (W34): the report as text or JSON, on the console or into a file.
+struct Output {
+  bool json = false;
+  std::wstring file;
+  FILE* console = nullptr;  // where JSON for the console goes; everything else goes to stderr
+};
+Output g_output;
+
+// JSON on the console must be the only thing there, so a script can parse it: from here on
+// every other line waitwhy prints goes to stderr.
+void KeepConsoleForJson() {
+  if (!g_output.json || !g_output.file.empty()) return;
+  std::fflush(stdout);
+  const int copy = _dup(_fileno(stdout));
+  if (copy < 0) return;
+  g_output.console = _fdopen(copy, "w");
+  _dup2(_fileno(stderr), _fileno(stdout));
+}
+
+int WriteReport(const Report& report) {
+  const std::string text = g_output.json ? RenderJson(report) : RenderText(report);
+  if (g_output.file.empty()) {
+    FILE* out = g_output.console ? g_output.console : stdout;
+    std::fputs(text.c_str(), out);
+    std::fflush(out);
+    return kExitOk;
+  }
+  FILE* f = nullptr;
+  if (_wfopen_s(&f, g_output.file.c_str(), L"wb") != 0 || !f) {
+    std::printf("Cannot write the report to %s.\n", Narrow(g_output.file).c_str());
+    return kExitUsage;
+  }
+  std::fputs(text.c_str(), f);
+  std::fclose(f);
+  std::printf("Wrote the report to %s.\n", Narrow(g_output.file).c_str());
+  return kExitOk;
+}
+
 // Thread labels; with several processes, threads of the others say which process (W33).
 std::string ProgramThreadLabel(uint32_t tid) {
   std::string label = ThreadLabel(tid);
@@ -1155,8 +1194,8 @@ std::string ProgramThreadLabel(uint32_t tid) {
   return label;
 }
 
-void PrintReport(double ticksPerSecond, ReportOptions opt, const SessionProps& stopped,
-                 bool stacksOn, const SymbolizerFor& symbolsFor, bool symbolsOk) {
+int PrintReport(double ticksPerSecond, ReportOptions opt, const SessionProps& stopped,
+                bool stacksOn, const SymbolizerFor& symbolsFor, bool symbolsOk) {
   Symbolizer& sym = symbolsFor(g_analysis.pid);
   opt.ticksPerSecond = ticksPerSecond;
   opt.eventsLost = stopped.props.EventsLost;
@@ -1169,7 +1208,7 @@ void PrintReport(double ticksPerSecond, ReportOptions opt, const SessionProps& s
   const Report report = BuildReport(
       g_analysis, SymbolsFor([&symbolsFor](uint32_t pid) -> SymbolSource& { return symbolsFor(pid); }),
       opt, ProgramThreadLabel);
-  std::fputs(RenderText(report).c_str(), stdout);
+  return WriteReport(report);
 }
 
 // Rebuilds the report from a version 2 dump (W18, W19), with no kernel trace and without the
@@ -1200,9 +1239,8 @@ int ReportFromDump(const std::wstring& path, ReportOptions opt) {
     auto it = info.threadNames.find(tid);
     return it != info.threadNames.end() ? it->second : "Thread " + std::to_string(tid);
   };
-  std::printf("Report rebuilt from %s.\n", Narrow(path).c_str());
-  std::fputs(RenderText(BuildReport(an, SymbolsFor(std::ref(sym)), opt, name)).c_str(), stdout);
-  return kExitOk;
+  if (!g_output.json) std::printf("Report rebuilt from %s.\n", Narrow(path).c_str());
+  return WriteReport(BuildReport(an, SymbolsFor(std::ref(sym)), opt, name));
 }
 
 constexpr char kVersion[] = "0.9.0";
@@ -1234,6 +1272,9 @@ void Usage() {
       "                       path. Without it, _NT_SYMBOL_PATH is used when set.\n"
       "\n"
       "Report options:\n"
+      "  --format text|json   the report as text (default) or as JSON; the JSON layout is\n"
+      "                       docs/report-schema.json\n"
+      "  --out FILE           write the report to FILE instead of the console\n"
       "  --top N              show the N biggest groups of waits (default 6)\n"
       "  --min-ms N           hide groups smaller than N milliseconds (default 10)\n"
       "  --stall-ms N         report any single lock, disk, network or page-fault wait of\n"
@@ -1318,7 +1359,8 @@ int wmain(int argc, wchar_t** argv) {
     }
     const bool takesValue = a == L"--pid" || a == L"--name" || a == L"--seconds" || a == L"--top" ||
                             a == L"--min-ms" || a == L"--stall-ms" || a == L"--dump-events" ||
-                            a == L"--symbols" || a == L"--from-dump";
+                            a == L"--symbols" || a == L"--from-dump" || a == L"--format" ||
+                            a == L"--out";
     if (!takesValue) {
       if (a == L"--help" || a == L"-h") {
         Usage();
@@ -1363,8 +1405,15 @@ int wmain(int argc, wchar_t** argv) {
       g_symbolsOption = value;
     } else if (a == L"--from-dump") {
       fromDump = value;
+    } else if (a == L"--format") {
+      const std::wstring format = value;
+      if (format != L"text" && format != L"json") return UsageError("--format is text or json.");
+      g_output.json = format == L"json";
+    } else if (a == L"--out") {
+      g_output.file = value;
     }
   }
+  KeepConsoleForJson();
   if (!fromDump.empty()) {
     if (pid != 0 || !name.empty() || !dumpPath.empty())
       return UsageError("A report from a dump takes no --pid, --name or --dump-events.");
@@ -1589,7 +1638,6 @@ int wmain(int argc, wchar_t** argv) {
     std::printf("Wrote %llu events to %s.\n", static_cast<unsigned long long>(g_dumpLines),
                 Narrow(dumpPath).c_str());
   }
-  PrintReport(static_cast<double>(freq.QuadPart), shown, stopped, stacksOn, symbolsFor, symbolsOk);
-  return kExitOk;
+  return PrintReport(static_cast<double>(freq.QuadPart), shown, stopped, stacksOn, symbolsFor, symbolsOk);
 }
 #endif  // WAITWHY_NO_MAIN

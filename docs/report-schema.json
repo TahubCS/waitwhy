@@ -1,0 +1,150 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/TahubCS/waitwhy/docs/report-schema.json",
+  "title": "waitwhy report, version 1",
+  "description": "waitwhy --format json (W34). The same report as the text one; text and JSON are renderings of one model (report.h). Fields are only added within version 1; a removal or change of meaning makes version 2.",
+  "type": "object",
+  "required": ["schema", "program", "pid", "otherProcesses", "windowSeconds", "warnings", "threads",
+               "idleThreads", "unseenThreads", "waits", "hiddenWaitRows", "hiddenWaitSeconds",
+               "findings", "dataQuality", "counters"],
+  "properties": {
+    "schema": { "const": "waitwhy-report/1" },
+    "program": { "type": "string", "description": "The program's file name, or \"process\" when unknown." },
+    "pid": { "type": "integer" },
+    "otherProcesses": { "type": "integer", "description": "Children (--children) or other instances (--all) watched with it." },
+    "windowSeconds": { "type": "number", "description": "From the start to the end of tracing." },
+    "warnings": { "type": "array", "items": { "type": "string" } },
+    "threads": {
+      "type": "array",
+      "description": "Where each thread's time went, most waiting first. Shares are of the thread's own lifetime in the window.",
+      "items": {
+        "type": "object",
+        "required": ["tid", "label", "runningPct", "waitingPct", "readyPct"],
+        "properties": {
+          "tid": { "type": "integer" },
+          "label": { "type": "string" },
+          "runningPct": { "type": "number" },
+          "waitingPct": { "type": "number" },
+          "readyPct": { "type": "number", "description": "Ready to run but without a free CPU." }
+        }
+      }
+    },
+    "idleThreads": { "type": "array", "items": { "type": "integer" }, "description": "Thread-pool threads that only waited for work outside the program's code; left out of threads, waits and findings." },
+    "unseenThreads": { "type": "integer", "description": "Threads that never ran during the window." },
+    "waits": {
+      "type": "array",
+      "description": "The biggest groups of waits (one activity: thread, category, function in the program's code), at most --top, none under --min-ms.",
+      "items": {
+        "type": "object",
+        "required": ["tid", "thread", "seconds", "pct", "count", "stillWaitingAtEnd", "longestSeconds",
+                     "p95Seconds", "category", "categoryLabel", "yourCode", "blockedIn", "objects",
+                     "wokenBy", "waitReason"],
+        "properties": {
+          "tid": { "type": "integer" },
+          "thread": { "type": "string" },
+          "seconds": { "type": "number" },
+          "pct": { "type": "number" },
+          "count": { "type": "integer" },
+          "stillWaitingAtEnd": { "type": "boolean" },
+          "longestSeconds": { "type": "number" },
+          "p95Seconds": { "type": ["number", "null"], "description": "95% of the waits took at most this; null below 20 waits." },
+          "category": { "$ref": "#/$defs/category" },
+          "categoryLabel": { "type": "string" },
+          "yourCode": { "type": "string", "description": "module!function in the program's own code, or \"(not in your program's code)\"." },
+          "blockedIn": { "type": "array", "items": { "$ref": "#/$defs/share", "properties": { "function": { "type": "string" } } } },
+          "objects": { "type": "array", "items": { "$ref": "#/$defs/share", "properties": { "object": { "type": "string" } } } },
+          "wokenBy": { "type": "string" },
+          "waitReason": {
+            "oneOf": [
+              { "type": "null", "description": "Not known: already blocked when the trace started." },
+              { "type": "object", "required": ["code", "name"], "properties": { "code": { "type": "integer" }, "name": { "type": "string" } } }
+            ]
+          }
+        }
+      }
+    },
+    "hiddenWaitRows": { "type": "integer" },
+    "hiddenWaitSeconds": { "type": "number" },
+    "findings": {
+      "type": "array",
+      "description": "\"What this means\".",
+      "items": {
+        "type": "object",
+        "required": ["kind", "tid", "thread", "pct"],
+        "properties": {
+          "kind": { "enum": ["wait", "cpuCompetition"] },
+          "tid": { "type": "integer" },
+          "thread": { "type": "string" },
+          "pct": { "type": "number" },
+          "category": { "$ref": "#/$defs/category" },
+          "yourCode": { "type": "string" },
+          "longestSeconds": { "type": "number" },
+          "longWait": { "type": "boolean", "description": "Its longest single wait reached --stall-ms." },
+          "onlyLongWait": { "type": "boolean", "description": "A finding only because of that, not its share." },
+          "chain": {
+            "type": "object",
+            "description": "Measured: what the thread that ended these waits did while they lasted.",
+            "required": ["waker", "seconds", "parts"],
+            "properties": {
+              "waker": { "type": "string" },
+              "seconds": { "type": "number" },
+              "parts": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["kind", "seconds", "pct"],
+                  "properties": {
+                    "kind": { "enum": ["waiting", "running", "ready", "notSeen"] },
+                    "category": { "$ref": "#/$defs/category" },
+                    "yourCode": { "type": "string" },
+                    "seconds": { "type": "number" },
+                    "pct": { "type": "number" }
+                  }
+                }
+              }
+            }
+          },
+          "releaser": {
+            "type": "object",
+            "description": "Only without a measured chain: the thread that released the lock and what it spends its time on.",
+            "properties": { "thread": { "type": "string" }, "category": { "$ref": "#/$defs/category" }, "yourCode": { "type": "string" } }
+          }
+        }
+      }
+    },
+    "dataQuality": {
+      "type": "object",
+      "required": ["confidence", "reasons", "eventsLost", "buffersLost", "stackPct", "wakerKnownPct", "modules", "pdbNotUsed"],
+      "properties": {
+        "confidence": { "enum": ["high", "medium", "low"] },
+        "reasons": { "type": "array", "items": { "type": "string" } },
+        "eventsLost": { "type": "integer" },
+        "buffersLost": { "type": "integer" },
+        "stackPct": { "type": "number" },
+        "wakerKnownPct": { "type": ["number", "null"] },
+        "modules": {
+          "type": "object",
+          "properties": {
+            "full": { "type": "array", "items": { "type": "string" } },
+            "exportsOnly": { "type": "array", "items": { "type": "string" } },
+            "none": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "pdbNotUsed": { "type": "string", "description": "A .pdb beside the program that does not match it; empty if none." }
+      }
+    },
+    "counters": {
+      "type": "object",
+      "properties": {
+        "contextSwitches": { "type": "integer" },
+        "waitsWithStack": { "type": "integer" },
+        "waitsWithoutStack": { "type": "integer" },
+        "kernelOnlyStackParts": { "type": "integer" }
+      }
+    }
+  },
+  "$defs": {
+    "category": { "enum": ["lock", "disk", "network", "sleep", "otherThread", "pageFault", "other"] },
+    "share": { "type": "object", "required": ["pct"], "properties": { "pct": { "type": "number" } } }
+  }
+}

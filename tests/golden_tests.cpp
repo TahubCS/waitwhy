@@ -31,7 +31,7 @@ std::string ReadFile(const std::string& path) {
   return s;
 }
 
-std::string ReportFromDump(const std::vector<DumpLine>& lines) {
+Report ReportFromDump(const std::vector<DumpLine>& lines) {
   Analyzer an;
   DumpReplay replay(an);
   const DumpInfo info = replay.Run(lines);
@@ -47,7 +47,7 @@ std::string ReportFromDump(const std::vector<DumpLine>& lines) {
     auto it = info.threadNames.find(tid);
     return it != info.threadNames.end() ? it->second : "Thread " + std::to_string(tid);
   };
-  return RenderText(BuildReport(an, SymbolsFor(std::ref(sym)), opt, name));
+  return BuildReport(an, SymbolsFor(std::ref(sym)), opt, name);
 }
 
 // Prints the first line where the two texts differ.
@@ -81,13 +81,25 @@ int main(int argc, char** argv) {
       ++Failures();
       continue;
     }
-    const std::string got = ReportFromDump(lines);
+    const Report report = ReportFromDump(lines);
+    const std::string got = RenderText(report);
     const bool same = got == want;
     std::printf("  %s report matches %s.report.txt\n", same ? "ok  " : "FAIL", name);
     if (!same) {
       ++Failures();
       ShowFirstDifference(got, want);
       std::printf("---- report as built ----\n%s---- end ----\n", got.c_str());
+    }
+    // W34: the same report as JSON.
+    const std::string wantJson = ReadFile(base + ".report.json");
+    if (!wantJson.empty()) {
+      const std::string gotJson = RenderJson(report);
+      const bool sameJson = gotJson == wantJson;
+      std::printf("  %s JSON matches %s.report.json\n", sameJson ? "ok  " : "FAIL", name);
+      if (!sameJson) {
+        ++Failures();
+        ShowFirstDifference(gotJson, wantJson);
+      }
     }
   }
   std::printf(Failures() ? "%d check(s) failed.\n" : "All checks passed.\n", Failures());

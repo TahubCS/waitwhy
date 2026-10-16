@@ -51,7 +51,8 @@ was stuck in (DbgHelp + .pdb); and which thread woke it up.
 | `tests/analysis_tests.cpp` | Unit tests for the analysis core: classification rules, frame choice, small event sequences. Portable. |
 | `dump.h` | Reads and replays `--dump-events` files (versions 1 and 2) through the analysis core; `DumpSymbols` names addresses from a dump. No Win32 calls. |
 | `report.h` | Builds the report as plain data from the analysis and prints it as text; used by the live run and by `--from-dump`. No Win32 calls. |
-| `tests/golden_tests.cpp`, `tests/golden/` | Rebuilds reports from hand-written version 2 dumps and compares them byte for byte with the expected reports. Portable. |
+| `tests/golden_tests.cpp`, `tests/golden/` | Rebuilds reports from hand-written version 2 dumps and compares them byte for byte with the expected text and JSON reports. Portable. |
+| `docs/report-schema.json` | JSON Schema of `--format json` (W34), version `waitwhy-report/1`. |
 | `tests/check.h` | Check helpers shared by the tests. |
 | `LICENSE` | MIT (D11). |
 | `ROADMAP.md` | Proposed phased plan towards a tool others can rely on (`R` items, open decisions `X`). A proposal, not approved; `FEATURES.md` wins on any conflict. |
