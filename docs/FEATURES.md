@@ -338,3 +338,5 @@ Newest line last. Format: `YYYY-MM-DD  ID  status  note`.
 - 2026-10-17  W51  approved by the user.
 - 2026-10-17  W49  confirmed  CI run #110: stuckpipe reports the writer, blocked in a pipe write for the whole window, on "a pipe", not the disk; CheckBlockedOnConsole passes on Windows, GCC and Clang. The console case itself is checked by the user's run-demo.ps1 (a selection in slowapp's window).
 - 2026-10-17  W51  confirmed  CI run #111: slowapp builds at /W4 /WX and CI is unchanged; slowapp --calibrate and run-demo.ps1 are checked by the user's next run-demo.ps1.
+- 2026-10-17  W51  confirmed  User's run-demo.ps1: slowapp --calibrate measured 24/46/85/186 ms for 32/64/128/256 MB and chose 256 MB; the buggy run reports main 54% waiting for the lock in update_frame (longest 379 ms), the fixed run 16 ms of lock waits and no lock finding (C8 holds on a fast disk).
+- 2026-10-17  W50  confirmed  Same run: the chain reads "running, in slowapp!write_settings_to_disk: 2.02 s (48%)" and "waiting for the disk, in ...write_settings_to_disk: 1.93 s (46%)", and the advice names write_settings_to_disk.
