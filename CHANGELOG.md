@@ -7,19 +7,30 @@ release notes. The `W` numbers refer to `docs/FEATURES.md`.
 
 ## [Unreleased]
 
-### Changed
-- A thread blocked in a read or write for the whole window is reported on the object of that
-  call (console window, pipe, socket or file) instead of being guessed from function names; a
-  console that holds its output for a second or more gets a hint about selection mode (W49).
-- Wait chains say in which function of your code the lock holder was running, and when it both
-  runs and waits there, the advice names that function (W50).
-- `run-demo.ps1` measures the disk first (`slowapp --calibrate`) and makes slowapp write enough
-  per save for the bug to show on a fast disk too (W51).
-
 ## [1.0.0]
 
 The first release: waitwhy answers "my program is slow, but the CPU is idle: what is it waiting
-for?" for any Windows x64 program.
+for?" for any Windows x64 program. It follows every context switch of the program's threads
+through a kernel trace and reports, per thread, what each wait was on (a lock, the disk, the
+network, another thread, the console, a sleep), where in your code it happened, which thread
+ended it, and what that thread was doing meanwhile. No injection, no instrumentation, no
+restart.
+
+```powershell
+# Administrator PowerShell
+.\waitwhy.exe --name myapp.exe --seconds 10            # watch a running program
+.\waitwhy.exe -- .\myapp.exe --its-args                # start it under waitwhy
+.\waitwhy.exe --name myapp.exe --format html --out report.html
+# No Administrator needed
+.\waitwhy.exe analyze trace.etl                        # a trace recorded here or elsewhere
+.\waitwhy.exe diff before.json after.json --fail-if-worse 10
+```
+
+**Download:** `waitwhy-1.0.0-win-x64.zip` holds `waitwhy.exe` and its `.pdb`, Microsoft's
+`dbghelp.dll` and `symsrv.dll`, the license, the README and the docs. Unzip and run; nothing to
+install. Check it with `SHA256SUMS.txt`, or with
+`gh attestation verify waitwhy-1.0.0-win-x64.zip -R TahubCS/waitwhy` (built by this
+repository's release workflow). Start with `docs/how-to-read-a-report.md`.
 
 ### Watching a program
 - `waitwhy --pid N`, `--name X` (`--all` for every instance), or `waitwhy -- program args` to
@@ -39,6 +50,11 @@ for?" for any Windows x64 program.
 - Findings for waits over 10% of a thread's time or a single wait over `--stall-ms` (W23);
   idle thread-pool threads summarised on one line (W21).
 - A data-quality section with an overall confidence (W24).
+- A thread blocked in a read or write for the whole window is reported on the object of that
+  call (console window, pipe, socket or file) instead of being guessed from function names; a
+  console that holds its output for a second or more gets a hint about selection mode (W49).
+- Wait chains say in which function of your code the lock holder was running, and when it both
+  runs and waits there, the advice names that function (W50).
 - Function names that survive the program exiting (W26), and Windows' own symbols with
   `--symbols ms` (W27).
 
@@ -57,7 +73,9 @@ for?" for any Windows x64 program.
 ### Quality
 - The analysis core and report make no Windows calls and are unit- and golden-tested on
   Windows, GCC and Clang (W15, W16, W19); every build is warning-free at `/W4 /WX` (W17).
-- CI traces slowapp and eleven known-answer scenarios on every push (W29).
+- CI traces slowapp and twelve known-answer scenarios on every push (W29, W49).
+- `run-demo.ps1` measures the disk first (`slowapp --calibrate`) so the demo shows the bug on
+  a fast disk too (W51).
 - User documentation: how to read a report, troubleshooting, FAQ and scenarios (W40).
 
 ### Hardening
