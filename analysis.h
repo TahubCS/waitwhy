@@ -446,15 +446,7 @@ class Analyzer {
       ThreadState& st = threads[e.tid];
       st.ioInFlight[e.irp] = ThreadState::Io{e.fileObject, e.ts};
       irpThread[e.irp] = e.tid;
-      if (files.find(e.fileObject) == files.end()) {
-        auto named = unclaimedNames.find(e.fileObject);
-        if (named != unclaimedNames.end()) {
-          files.emplace(e.fileObject, std::move(named->second));
-          unclaimedNames.erase(named);
-        } else {
-          files.emplace(e.fileObject, FileName{});
-        }
-      }
+      ClaimFile(e.fileObject);
       return true;
     }
     auto it = irpThread.find(e.irp);
@@ -472,6 +464,14 @@ class Analyzer {
     if (IsProgramThread(waker)) return true;
     auto it = threadProcess.find(waker);
     return it != threadProcess.end() && it->second != 0 && it->second != kSystemProcess;
+  }
+
+  // The name of a file object, used by the program or not (yet): what a stack snapshot's
+  // blocked handle refers to (W49).
+  const FileName* NameOf(uint64_t fileObject) const {
+    if (const FileName* f = FileOf(fileObject)) return f;
+    auto it = unclaimedNames.find(fileObject);
+    return fileObject && it != unclaimedNames.end() ? &it->second : nullptr;
   }
 
   const FileName* FileOf(uint64_t fileObject) const {
@@ -520,7 +520,9 @@ class Analyzer {
 
   // A whole-window thread becomes one wait from the window start; FlushAtEnd records both
   // kinds as still waiting at the end.
-  void ApplySnapshot(uint32_t tid, std::vector<uint64_t> frames) {
+  // `fileObject`: the file object of the file I/O it is blocked in, when the caller found it
+  // (W49); a wait whose I/O started inside the trace already has its own.
+  void ApplySnapshot(uint32_t tid, std::vector<uint64_t> frames, uint64_t fileObject = 0) {
     ThreadState& st = threads[tid];
     if (!st.seen && !st.offCpu) {
       st.open = OffCpu{};
@@ -531,6 +533,10 @@ class Analyzer {
       st.seen = true;
     }
     st.open.stack = std::move(frames);
+    if (fileObject && !st.open.fileObject) {
+      st.open.fileObject = fileObject;
+      ClaimFile(fileObject);
+    }
   }
 
   // Called after tracing stops: close out anything still in progress.
@@ -551,6 +557,19 @@ class Analyzer {
   }
 
  private:
+  // The program uses a file object: it gets a name entry, taking over a name seen before (the
+  // rundown of files already open).
+  void ClaimFile(uint64_t fileObject) {
+    if (files.find(fileObject) != files.end()) return;
+    auto named = unclaimedNames.find(fileObject);
+    if (named != unclaimedNames.end()) {
+      files.emplace(fileObject, std::move(named->second));
+      unclaimedNames.erase(named);
+    } else {
+      files.emplace(fileObject, FileName{});
+    }
+  }
+
   void Record(uint32_t tid, ThreadState& st, const OffCpu& w, bool stillWaiting) {
     if (!w.isWait) {
       st.readyTicks += w.end > w.start ? w.end - w.start : 0;  // preempted: wanted the CPU

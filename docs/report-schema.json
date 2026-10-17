@@ -81,6 +81,7 @@
           "longestSeconds": { "type": "number" },
           "longWait": { "type": "boolean", "description": "Its longest single wait reached --stall-ms." },
           "onlyLongWait": { "type": "boolean", "description": "A finding only because of that, not its share." },
+          "console": { "enum": ["output", "input"], "description": "W49: most of the time was on the console window and one wait lasted 1 s or more; output: the window did not take the writes (e.g. selection mode), input: waiting for typed input." },
           "chain": {
             "type": "object",
             "description": "Measured: what the thread that ended these waits did while they lasted.",

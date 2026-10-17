@@ -17,7 +17,8 @@
 //   THREAD     ts kind pid tid                     kind: 0 created, 1 existing, 2 ended
 //   END        ts contextSwitches stacksOn eventsLost buffersLost [snapshots]   tracing stopped: end of window
 //              (snapshots=0: no stack snapshots were taken, --no-suspend, W45)
-//   SNAPSHOT   tid frames=0x..,0x..                stack of a thread still blocked (W7)
+//   SNAPSHOT   tid [fileObject] frames=0x..,0x..   stack of a thread still blocked (W7), and the
+//              file object of the file I/O it is blocked in, when found (W49)
 //   NAMES      symbolsOk fromTrace                 names found; fromTrace: from the IMAGE lines (W26)
 //   PDB        file=<path>                         a .pdb beside the program (W26)
 //   IMAGE      ts base size name=<path>            a module the program had loaded (W26)
@@ -335,7 +336,8 @@ class DumpReplay {
       an_.processNames[static_cast<uint32_t>(l.Get("pid"))] = l.Has("name") ? l.text.at("name") : "";
     } else if (l.kind == "SNAPSHOT") {
       an_.ApplySnapshot(static_cast<uint32_t>(l.Get("tid")),
-                        l.Has("frames") ? ParseFrames(l.text.at("frames")) : std::vector<uint64_t>{});
+                        l.Has("frames") ? ParseFrames(l.text.at("frames")) : std::vector<uint64_t>{},
+                        l.Get("fileObject"));
     }
   }
 

@@ -100,6 +100,10 @@ struct Finding {
   std::string waker;
   double chainSeconds = 0;  // the waits it ended
   std::vector<ChainPart> chain;
+  // Kind::Wait: most of these waits were on the console window and one lasted a second or more
+  // (W49): its output was held (e.g. a selection in the window) or it waited for typed input.
+  enum class Console { None, Output, Input };
+  Console console = Console::None;
 };
 
 // How far the report can be trusted (W24).
@@ -177,6 +181,7 @@ struct WaitGroup {
   std::map<int8_t, uint64_t> reasons;
   std::map<std::string, uint64_t> blockedIn;
   std::map<std::string, uint64_t> objects;  // W28
+  uint64_t consoleTicks = 0;                 // ... of which on the console window (W49)
 };
 
 // What a bucket of waits was on, as the report says it (W28): the names, refined by the object
@@ -308,8 +313,10 @@ inline Report BuildReport(const Analyzer& an, const SymbolsFor& symbolsFor, cons
     for (const auto& [waker, t] : b.wakers) g.wakers[waker] += t;
     g.reasons[b.reason] += b.ticks;
     g.blockedIn[BlockedInFrame(b, symOf(b.tid))] += b.ticks;
-    if (const Analyzer::FileName* f = an.FileOf(b.fileObject))
+    if (const Analyzer::FileName* f = an.FileOf(b.fileObject)) {
       g.objects[DescribeObject(f->kind == ObjectKind::None ? ObjectKind::Device : f->kind, f->path)] += b.ticks;
+      if (f->kind == ObjectKind::Console) g.consoleTicks += b.ticks;
+    }
   }
   std::vector<const WaitGroup*> groups;
   for (const auto& [key, g] : groupMap) groups.push_back(&g);
@@ -468,6 +475,17 @@ inline Report BuildReport(const Analyzer& an, const SymbolsFor& symbolsFor, cons
       f.longestSeconds = secs(g->durations.longest);
       f.longWait = longWait;
       f.onlyLongWait = !bigShare;
+      if (2 * g->consoleTicks > g->ticks && f.longestSeconds >= 1.0) {
+        // Read or write: the system function it was blocked in most of the time says which.
+        const auto blocked = std::max_element(g->blockedIn.begin(), g->blockedIn.end(),
+                                              [](const auto& x, const auto& y) { return x.second < y.second; });
+        std::string fn = blocked != g->blockedIn.end() ? blocked->first : std::string();
+        for (char& ch : fn) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        if (fn.find("write") != std::string::npos)
+          f.console = Finding::Console::Output;
+        else if (fn.find("read") != std::string::npos)
+          f.console = Finding::Console::Input;
+      }
       const uint32_t waker = TopWaker(*g);
       if ((c == Category::Lock || c == Category::OtherThread) && an.IsProgramThread(waker) &&
           waker != tid)
@@ -609,6 +627,14 @@ inline std::string RenderFindingText(const Finding& f) {
     if (f.longWait)
       Appendf(out, "    Its longest single wait was %s.\n", FormatDuration(f.longestSeconds).c_str());
   }
+  if (f.console == Finding::Console::Output)
+    Appendf(out,
+            "    The console window did not take its output for %s. A console window in selection\n"
+            "    mode (a click or drag in it, with QuickEdit on) holds every write until Esc is pressed.\n",
+            FormatDuration(f.longestSeconds).c_str());
+  else if (f.console == Finding::Console::Input)
+    Appendf(out, "    It was waiting for input typed in the console window, for up to %s.\n",
+            FormatDuration(f.longestSeconds).c_str());
   if (!f.chain.empty()) {
     // Measured (W25): what the waker did while this thread waited for it.
     if (f.category == Category::Lock)
@@ -1019,6 +1045,8 @@ inline std::string RenderJson(const Report& r) {
       j.Num("longestSeconds", f.longestSeconds);
       j.Bool("longWait", f.longWait);
       j.Bool("onlyLongWait", f.onlyLongWait);
+      if (f.console != Finding::Console::None)
+        j.Str("console", f.console == Finding::Console::Output ? "output" : "input");  // W49
       if (!f.chain.empty()) {
         j.Open('{', "chain");
         j.Str("waker", f.waker);

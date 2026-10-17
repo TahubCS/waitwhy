@@ -61,7 +61,7 @@ the rest are counted on one line.
 |---|---|
 | waited ... over N wait(s) | Total time, its share of the thread's lifetime, and how many separate waits. "still waiting at the end" means the last one had not ended when the trace stopped. |
 | Waiting on | What it waited for: a lock, the disk, the network, another thread or an event, memory being loaded from disk (page faults), an intentional sleep or timer, or something else. Decided from the call stack, the file or device the I/O went to, and which thread ended the wait. |
-| Object | For file I/O: the file, pipe, socket or console it went to, and its share when there were several. |
+| Object | For file I/O: the file, pipe, socket or console it went to, and its share when there were several. For a thread blocked for the whole window, the object of the handle its blocked read or write was given (W49). |
 | Longest | The longest single wait, and with 20 or more waits the 95th percentile. A short total with a long single wait is a stall (see below). |
 | Your code | The innermost function of **your program** on the stack: where in your code to look. `(not in your program's code)` when the stack never passed through it, for example a thread-pool thread. |
 | Blocked in | The system function it was blocked in, with shares when there were several. |
@@ -102,6 +102,12 @@ the holder did while holding it, and the last line says what to change:
 | sleeping | Release the lock before sleeping. |
 | waiting for another lock | One lock waits on the next: look at the chain. |
 | waiting for the disk, network, ... | Move that work outside the lock. |
+
+When most of a finding's time was spent on the console window and one wait lasted a second or
+more, it adds a line. For a write: "The console window did not take its output": a console in
+selection mode (a click or drag in the window, with QuickEdit on) holds every write until Esc is
+pressed, and the program stands still meanwhile. For a read: it was waiting for input typed in
+the console window.
 
 "No thread lost a significant share of its time to blocking (sleeps excluded)." means nothing
 crossed those thresholds.

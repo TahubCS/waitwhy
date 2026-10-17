@@ -9,6 +9,7 @@ page lists what it touches, what it trusts, and how each risk is handled (W46).
 |---|---|---|
 | Starts a kernel trace session (`waitwhy-<pid>`) | Context switches and stacks come only from the kernel logger | Stopped on exit and on Ctrl+C; one left behind by a killed waitwhy is stopped by the next run (W31) |
 | Opens the watched process (`PROCESS_QUERY_INFORMATION`, `PROCESS_VM_READ`) | DbgHelp names functions from the modules it has loaded; stack snapshots read the stacks of threads blocked the whole window | Read only. Snapshots pause each such thread for a moment; `--no-suspend` turns them off, `record` never takes them (D13) |
+| Reads the handle a snapshotted thread is blocked on, and the system's handle list | To tell a console, pipe or socket from a file on disk (W49) | Only with snapshots. The debug privilege is enabled for the one handle-list query and set back after it; the handle is only looked up, never opened or used |
 | Starts a program (`waitwhy -- program`) | Launch mode | Created suspended, resumed once the trace runs, with the user's own rights and command line |
 | Writes files | Reports, dumps, exports, traces | Only the paths given with `--out`, `--dump-events`, `--export-*`, `record --out` (plus `FILE.etl.waitwhy`) |
 | Network | Microsoft's symbol server | Only with `--symbols ms` or a `srv*` symbol path; DbgHelp and symsrv fetch symbol files for loaded modules |

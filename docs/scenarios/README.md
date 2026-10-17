@@ -23,5 +23,6 @@ Start-Process .\scenarios.exe -ArgumentList '--mode', 'lockdisk', '--seconds', '
 | [locksleep](locksleep.md) | A lock held while sleeping | a lock held by another thread |
 | [lockdisk](lockdisk.md) | A lock held while writing to disk | a lock held by another thread |
 | [sleep](sleep.md) | Nothing but sleeps | an intentional sleep or timer |
+| [stuckpipe](stuckpipe.md) | A pipe write blocked for the whole window | another thread or an event (a pipe) |
 
 `slowapp.exe` stays the reference case for the main finding (a lock held during disk work); see the README.

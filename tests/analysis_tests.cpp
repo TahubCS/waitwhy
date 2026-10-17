@@ -560,6 +560,46 @@ void CheckChainRunningIn() {
                                "slowapp!write_settings_to_disk.") != std::string::npos, 1);
 }
 
+// W49: main is blocked writing to the console for the whole window (a selection in the
+// console window holds its output). The stack snapshot finds the file object of the write; the
+// trace's rundown named it before the program used it. Replayed from a dump.
+void CheckBlockedOnConsole() {
+  std::printf("A thread blocked on the console for the whole window (W49)\n");
+  FakeSymbols sym;
+  const auto write = sym.Stack({"ntdll!NtWriteFile", "KERNELBASE!WriteFile", "ucrtbase!_write",
+                                "slowapp!print_status", "slowapp!main"});
+  std::string frames;
+  for (uint64_t a : write) frames += (frames.empty() ? "0x" : ",0x") + [a] {
+    char hex[32];
+    std::snprintf(hex, sizeof hex, "%llx", static_cast<unsigned long long>(a));
+    return std::string(hex);
+  }();
+  std::istringstream in(
+      "DUMP version=2 pid=7 ticksPerSecond=1000\n"
+      "TARGET tid=1\n"
+      "WINDOW ts=1000\n"
+      "FILENAME fileObject=0xffffa00012345670 kind=3 name=\\Device\\ConDrv\\Output\n"
+      "END ts=9000 contextSwitches=0 stacksOn=1 eventsLost=0 buffersLost=0\n"
+      "SNAPSHOT tid=1 fileObject=0xffffa00012345670 frames=" + frames + "\n");
+  Analyzer an;
+  DumpReplay replay(an);
+  replay.Run(ReadDump(in));
+  ExpectEq("the console is now the program's file", an.FileOf(0xffffa00012345670ULL) != nullptr, 1);
+  ReportOptions opt;
+  opt.ticksPerSecond = 1000;
+  const Report rep = BuildReport(an, sym, opt, [](uint32_t t) { return "Thread " + std::to_string(t); });
+  const Finding* f = rep.findings.empty() ? nullptr : &rep.findings.front();
+  ExpectEq("a finding", f != nullptr, 1);
+  if (!f) return;
+  ExpectCategory("not the disk", f->category, Category::OtherThread);
+  ExpectEq("console output held", f->console == Finding::Console::Output, 1);
+  const std::string text = RenderText(rep);
+  ExpectEq("object line", text.find("Object     : the console window") != std::string::npos, 1);
+  ExpectEq("note", text.find("The console window did not take its output for 8.00 s. A console window in "
+                             "selection\n") != std::string::npos, 1);
+  ExpectEq("JSON", RenderJson(rep).find("\"console\": \"output\"") != std::string::npos, 1);
+}
+
 // W35: two JSON reports compared by activity; the thread name, not its ID, matches them.
 // W44: a thread with more different call stacks than kMaxBucketsPerThread keeps the rest
 // together by wait reason, and the report says so.
@@ -712,6 +752,7 @@ int main() {
   CheckRedact();
   CheckDamagedDump();
   CheckChainRunningIn();
+  CheckBlockedOnConsole();
   std::printf(Failures() ? "%d check(s) failed.\n" : "All checks passed.\n", Failures());
   return Failures() ? 1 : 0;
 }

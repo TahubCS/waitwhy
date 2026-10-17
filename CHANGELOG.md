@@ -7,6 +7,13 @@ release notes. The `W` numbers refer to `docs/FEATURES.md`.
 
 ## [Unreleased]
 
+### Changed
+- A thread blocked in a read or write for the whole window is reported on the object of that
+  call (console window, pipe, socket or file) instead of being guessed from function names; a
+  console that holds its output for a second or more gets a hint about selection mode (W49).
+- Wait chains say in which function of your code the lock holder was running, and when it both
+  runs and waits there, the advice names that function (W50).
+
 ## [1.0.0]
 
 The first release: waitwhy answers "my program is slow, but the CPU is idle: what is it waiting

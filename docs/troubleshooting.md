@@ -82,6 +82,15 @@ A circular trace (the flight recorder, or WPR in memory mode) keeps only its end
 `waitwhy record`. Copy both files together, or give the program with `--pid N` or
 `--name program.exe` (always needed for traces from WPR or xperf).
 
+## "The console window did not take its output for ..."
+
+A thread wrote to its console window and the window did not take the text. The usual cause is
+selection mode: with QuickEdit on (the default), a click or drag in a console window starts a
+selection, the title says "Select", and every write to it waits until Esc or Enter is pressed.
+Turn QuickEdit off in the window's properties, or send long-running output to a file. Before
+W49, a write that was already stuck when tracing started could be reported as "the disk";
+`--no-suspend` and `.etl` traces still give that guess, because they take no stack snapshots.
+
 ## Still stuck
 
 Run with `--dump-events dump.txt` and attach the dump and the report to an issue: the dump

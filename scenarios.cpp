@@ -19,6 +19,8 @@
 //   locksleep   main waits for a lock that a worker holds while sleeping
 //   lockdisk    main waits for a lock that a worker holds while writing to disk
 //   sleep       everything only sleeps: no finding
+//   stuckpipe   (W49) writer is blocked writing to a pipe nobody reads, from before tracing
+//               starts until after it ends: another thread (a pipe), not the disk
 //   sleeper     (used by child) sleeps and exits
 //   bench       (W43, for measuring waitwhy's overhead) pairs of threads hand a token back and
 //               forth as fast as they can, about the worst case for waitwhy: every hand-over
@@ -197,6 +199,34 @@ void RunPipe() {
   while (!g_quit) Sleep(50);
   client.join();
   server.join();
+}
+
+// ---- stuck pipe (W49) ---------------------------------------------------------------------
+
+const wchar_t kStuckPipeName[] = L"\\\\.\\pipe\\waitwhy_stuck";
+
+// Writes until the pipe is full; the next write blocks until main closes its end.
+NOINLINE void fill_pipe() {
+  NameThisThread(L"writer");
+  HANDLE pipe = CreateFileW(kStuckPipeName, GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+  if (pipe == INVALID_HANDLE_VALUE) return;
+  static char block[65536];
+  DWORD n = 0;
+  while (!g_quit && WriteFile(pipe, block, sizeof block, &n, nullptr)) {
+  }
+  CloseHandle(pipe);
+}
+
+void RunStuckPipe() {
+  HANDLE pipe = CreateNamedPipeW(kStuckPipeName, PIPE_ACCESS_INBOUND, PIPE_TYPE_BYTE | PIPE_WAIT, 1, 4096, 4096,
+                                 0, nullptr);
+  if (pipe == INVALID_HANDLE_VALUE) return;
+  std::thread writer(fill_pipe);
+  ConnectNamedPipe(pipe, nullptr);  // the writer may already be connected
+  while (!g_quit) Sleep(50);        // never reads
+  DisconnectNamedPipe(pipe);        // ends the blocked write
+  CloseHandle(pipe);
+  writer.join();
 }
 
 // ---- socket -------------------------------------------------------------------------------
@@ -440,10 +470,11 @@ int main(int argc, char** argv) {
   else if (mode == "child") RunChild();
   else if (mode == "lockcpu" || mode == "locksleep" || mode == "lockdisk") RunLock(mode);
   else if (mode == "sleep") RunSleep();
+  else if (mode == "stuckpipe") RunStuckPipe();
   else if (mode == "bench") RunBench(seconds, workUs);
   else {
     std::printf("usage: scenarios --mode condvar|coldread|console|pipe|socket|cpu|child|\n"
-                "                        lockcpu|locksleep|lockdisk|sleep|bench [--seconds N]\n"
+                "                        lockcpu|locksleep|lockdisk|sleep|stuckpipe|bench [--seconds N]\n"
                 "                        [--work-us N, bench only]\n");
     return 1;
   }

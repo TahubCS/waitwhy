@@ -329,7 +329,12 @@ jobs:
             @{ Mode = 'lockcpu'; Hard = @('So it holds the lock while it is running') },
             @{ Mode = 'locksleep'; Hard = @('So it holds the lock while it is sleeping on purpose') },
             @{ Mode = 'lockdisk'; Hard = @('So it holds the lock while it is waiting for the disk') },
-            @{ Mode = 'sleep'; Hard = @('No thread lost a significant share of its time to blocking') }
+            @{ Mode = 'sleep'; Hard = @('No thread lost a significant share of its time to blocking') },
+            # W49: blocked the whole window; the snapshot's handle names the pipe.
+            @{ Mode = 'stuckpipe'; Args = @('--dump-events', 'stuckpipe-events.txt'); Dump = 'stuckpipe-events.txt';
+               Hard = @('\(writer\) spent \d+% of the time waiting for another thread or an event to signal it, in scenarios!.*fill_pipe',
+                        'Object     : a pipe');
+               Not = @('waiting for the disk, in scenarios!.*fill_pipe') }
           )
           $failures = @()
           foreach ($c in $cases) {
@@ -342,6 +347,9 @@ jobs:
             if (-not $app.HasExited) { Stop-Process -Id $app.Id -ErrorAction SilentlyContinue }
             Write-Host "::group::scenario $($c.Mode) (exit code $code)"
             Write-Host $text
+            if ($c.Dump -and (Test-Path $c.Dump)) {
+              Select-String -Path $c.Dump -Pattern '^(SNAPSHOT|FILENAME) ' | ForEach-Object { Write-Host $_.Line }
+            }
             Write-Host '::endgroup::'
             if ($code -eq 2) { Write-Host "::warning::Kernel tracing is not available; scenario $($c.Mode) skipped."; continue }
             if ($code -ne 0) { $failures += "$($c.Mode): waitwhy exited with code $code"; continue }
