@@ -314,3 +314,5 @@ Newest line last. Format: `YYYY-MM-DD  ID  status  note`.
 - 2026-10-17  W44  confirmed  CI run #97: CheckBucketCap passes on Windows, GCC and Clang; golden reports unchanged.
 - 2026-10-17  W45  confirmed  CI run #95: the nosuspend smoke run reports main's lock wait in update_frame and "Stack snapshots: not taken"; its rebuilt report equals the live one.
 - 2026-10-17  W47  confirmed  CI run #98: CheckRedact passes on Windows, GCC and Clang.
+- 2026-10-17  W46  confirmed  CI runs #105 and #106: tests under ASan and UBSan pass; fuzz_dump and fuzz_json run 60 s each with no finding after the two fixes (dump numbers, replayed stack depth); waitwhy.exe shows control-flow guard and high-entropy ASLR in its PE headers.
+- 2026-10-17  W48  confirmed  CI run #105: CONTRIBUTING.md and the issue forms in; build green.
