@@ -14,6 +14,8 @@
 //   .\slowapp.exe                 buggy version (disk write inside the lock)
 //   .\slowapp.exe --fixed         fixed version (copy under the lock, write outside it)
 //   .\slowapp.exe --mb 64         write 64 MB per save (default 32) if your disk is very fast
+//   .\slowapp.exe --calibrate     find the save size for this disk and print it as "mb=N" (W51):
+//                                 doubled from 32 MB until one save takes 150 ms, at most 256 MB
 //   .\slowapp.exe --seconds 20    exit by itself after 20 seconds
 
 #ifndef UNICODE
@@ -95,6 +97,22 @@ NOINLINE void save_settings() {
   }
 }
 
+// W51: the smallest save size from 32 MB up (doubling, at most 256 MB) whose save takes at
+// least 150 ms here, so the bug shows on a fast disk too. Each size is timed twice and the
+// faster time counts: the first write of a new size also fills the file system's caches.
+int CalibrateMegabytes() {
+  for (g_megabytesPerSave = 32;; g_megabytesPerSave *= 2) {
+    double best = 1e9;
+    for (int i = 0; i < 2; ++i) {
+      const double t0 = NowMs();
+      write_settings_to_disk(g_settings);
+      best = (std::min)(best, NowMs() - t0);
+    }
+    std::printf("A save of %d MB takes %.0f ms on this disk.\n", g_megabytesPerSave, best);
+    if (best >= 150.0 || g_megabytesPerSave >= 256) return g_megabytesPerSave;
+  }
+}
+
 NOINLINE void saver_thread() {
   NameThisThread(L"saver");
   while (!g_quit) {
@@ -124,6 +142,7 @@ BOOL WINAPI OnCtrl(DWORD) {
 
 int main(int argc, char** argv) {
   int runSeconds = 0;  // 0 = run until Ctrl+C
+  bool calibrate = false;
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--fixed") == 0) {
       g_fixed = true;
@@ -131,8 +150,10 @@ int main(int argc, char** argv) {
       g_megabytesPerSave = (std::max)(8, std::atoi(argv[++i]));
     } else if (std::strcmp(argv[i], "--seconds") == 0 && i + 1 < argc) {
       runSeconds = std::atoi(argv[++i]);
+    } else if (std::strcmp(argv[i], "--calibrate") == 0) {
+      calibrate = true;
     } else {
-      std::printf("usage: slowapp [--fixed] [--mb N] [--seconds N]\n");
+      std::printf("usage: slowapp [--fixed] [--mb N] [--seconds N] | slowapp --calibrate\n");
       return 1;
     }
   }
@@ -140,6 +161,12 @@ int main(int argc, char** argv) {
   wchar_t tempDir[MAX_PATH];
   GetTempPathW(MAX_PATH, tempDir);
   g_tempFile = std::wstring(tempDir) + L"slowapp_settings.tmp";
+  if (calibrate) {
+    const int mb = CalibrateMegabytes();
+    DeleteFileW(g_tempFile.c_str());
+    std::printf("mb=%d\n", mb);
+    return 0;
+  }
 
   NameThisThread(L"main");
   SetConsoleCtrlHandler(OnCtrl, TRUE);

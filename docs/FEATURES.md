@@ -217,6 +217,11 @@ approval before work begins; see the status log.
   CPU to the function of the program's code it ran in, when the stretch lies between two
   waits in that function; advice names that function when it both runs and waits there.
   Asked for by the user after slowapp --mb 128 showed "running" as the largest part. Serves C1.
+- **W51. A demo that shows the bug on any disk.** `slowapp --calibrate` finds the save size
+  (32 MB, doubled up to 256 MB) at which one save takes 150 ms on this disk; `run-demo.ps1`
+  runs the buggy and the fixed version with that size. Started by hand, slowapp keeps writing
+  32 MB per save, so CI is unchanged. Asked for by the user after a run-demo.ps1 run on a fast
+  disk gave no finding. Serves C8.
 
 ## Status log
 
@@ -330,3 +335,4 @@ Newest line last. Format: `YYYY-MM-DD  ID  status  note`.
 - 2026-10-17  W50  confirmed  CI run #108: CheckChainRunningIn passes on Windows, GCC and Clang; golden reports and the smoke-test lines unchanged.
 - 2026-10-17  W49  started  At the stack snapshot (suspended thread), NtQueryInformationThread(ThreadLastSystemCall) gives the blocked system call and its first argument; for NtReadFile, NtWriteFile, NtDeviceIoControlFile, NtFsControlFile and NtFlushBuffersFile (numbers read from ntdll's stubs) that is the file handle. The handle is matched to its kernel file object in the system handle list (SystemExtendedHandleInformation, debug privilege enabled for that one query) and kept only when the trace's file rundown named that object; nothing is queried on the handle itself, which could block behind the pending synchronous request. The dump's SNAPSHOT line gets fileObject= (after a FILENAME line), so a rebuilt report matches. A finding mostly on the console window with a wait of 1 s or more adds a selection-mode hint (write) or says it waits for typed input (read); JSON findings[].console. New scenario stuckpipe; unit test CheckBlockedOnConsole.
 - 2026-10-17  W49  started  CI run #109 red in the stuckpipe scenario: the writer was still "the disk" (no object found for its snapshot). With the user's OK the lookup changes: no system handle list and no debug privilege. The blocked call's handle is duplicated (PROCESS_DUP_HANDLE) and only its type asked, GetFileType on a helper thread given 200 ms: char → console, pipe → pipe (socket when the call was NtDeviceIoControlFile), disk → file. The snapshot wait gets a stand-in file object of that kind; the dump's SNAPSHOT line carries objectKind= (fileIo=unknown when the type was not found).
+- 2026-10-17  W51  approved by the user.

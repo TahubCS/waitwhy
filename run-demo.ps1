@@ -55,14 +55,22 @@ foreach ($dll in 'dbghelp.dll', 'symsrv.dll') {
     if (Test-Path $source) { Copy-Item $source -Destination $PSScriptRoot -Force }
 }
 
-# 4. Run slowapp in its own window, then point waitwhy at it.
+# 4. Pick how much slowapp writes per save, so a save takes long enough on this disk for the
+#    bug to show (W51). Both runs use the same size.
+Write-Host "Measuring this disk (slowapp --calibrate)..." -ForegroundColor Cyan
+$calibration = & (Join-Path $PSScriptRoot 'slowapp.exe') --calibrate
+$calibration | Where-Object { $_ -notmatch '^mb=' } | Out-Host
+$mb = if (($calibration | Out-String) -match 'mb=(\d+)') { $Matches[1] } else { '32' }
+Write-Host "slowapp will write $mb MB per save."
+
+# 5. Run slowapp in its own window, then point waitwhy at it.
 function Invoke-Case {
     param([string]$Title, [string[]]$SlowappArgs)
 
     Write-Host ""
     Write-Host "=== $Title ===" -ForegroundColor Yellow
     $app = Start-Process -FilePath (Join-Path $PSScriptRoot 'slowapp.exe') `
-        -ArgumentList (@('--seconds', '20') + $SlowappArgs) -PassThru
+        -ArgumentList (@('--seconds', '20', '--mb', $mb) + $SlowappArgs) -PassThru
     Write-Host "slowapp started (PID $($app.Id)) in a new window. Letting it warm up..."
     Start-Sleep -Seconds 3
     & (Join-Path $PSScriptRoot 'waitwhy.exe') --pid $app.Id --seconds 8

@@ -82,7 +82,7 @@ The script finds the C++ compiler, builds both programs as 64-bit, starts the bu
 | waitwhy: `saver` thread | Waiting on **the disk**, in `write_settings_to_disk` | Still waits on the disk, which is fine because it no longer holds the lock |
 | "What this means" section | Points out that `saver` holds the lock during slow disk work | "No thread lost a significant share of its time to blocking" |
 
-If your disk is very fast and the buggy numbers look small, start slowapp with more data per save: `.\slowapp.exe --mb 128`.
+`run-demo.ps1` first runs `slowapp --calibrate`, which finds how much slowapp has to write per save for a save to take at least 150 ms on your disk (32 MB doubled up to 256 MB), and runs both versions with that size. Started by hand, slowapp writes 32 MB per save; if your disk is very fast and the buggy numbers look small, give it more: `.\slowapp.exe --mb 128`.
 
 ## Use it on any program
 

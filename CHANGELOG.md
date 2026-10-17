@@ -13,6 +13,8 @@ release notes. The `W` numbers refer to `docs/FEATURES.md`.
   console that holds its output for a second or more gets a hint about selection mode (W49).
 - Wait chains say in which function of your code the lock holder was running, and when it both
   runs and waits there, the advice names that function (W50).
+- `run-demo.ps1` measures the disk first (`slowapp --calibrate`) and makes slowapp write enough
+  per save for the bug to show on a fast disk too (W51).
 
 ## [1.0.0]
 
