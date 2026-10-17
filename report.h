@@ -73,7 +73,7 @@ struct ChainPart {
   enum class Kind { Running, Ready, Waiting, NotSeen };
   Kind kind = Kind::Waiting;
   Category category = Category::Other;  // Kind::Waiting
-  std::string yourCode;                 // Kind::Waiting
+  std::string yourCode;                 // Kind::Waiting; Kind::Running when known (W50)
   double seconds = 0;
   double pct = 0;  // of the waits' time
 };
@@ -329,8 +329,38 @@ inline Report BuildReport(const Analyzer& an, const SymbolsFor& symbolsFor, cons
     std::vector<Interval> theirs = kt->second.intervals;
     std::sort(theirs.begin(), theirs.end(),
               [](const Interval& x, const Interval& y) { return x.start < y.start; });
-    uint64_t total = 0, running = 0, ready = 0;
+    uint64_t total = 0, ready = 0;
     std::map<const WaitGroup*, uint64_t> waiting;
+    // Where the waker was running (W50): a stretch on the CPU between two waits in the same
+    // function of the program's code ran in that function; a stretch whose two ends differ
+    // is only "running".
+    std::map<std::string, uint64_t> runningIn;
+    auto groupOf = [&](const Interval& i) -> const WaitGroup* {
+      auto gi = groupOfBucket.find({waker, i.bucket});
+      return gi == groupOfBucket.end() ? nullptr : gi->second;
+    };
+    auto runningFunction = [&](std::vector<Interval>::const_iterator run) -> std::string {
+      const WaitGroup* before = nullptr;
+      const WaitGroup* after = nullptr;
+      // A few steps each way: past preemptions, not across a thread that never waits.
+      int steps = 0;
+      for (auto p = run; p != theirs.begin() && steps < 16; ++steps) {
+        --p;
+        if (p->kind == Interval::Waiting) {
+          before = groupOf(*p);
+          break;
+        }
+      }
+      steps = 0;
+      for (auto n = run + 1; n != theirs.end() && steps < 16; ++n, ++steps)
+        if (n->kind == Interval::Waiting) {
+          after = groupOf(*n);
+          break;
+        }
+      if (!before || !after || before->yourCode != after->yourCode || before->yourCode == kNotYourCode)
+        return std::string();
+      return before->yourCode;
+    };
     for (const Interval& w : wt->second.intervals) {
       if (w.kind != Interval::Waiting || w.wokenBy != waker) continue;
       auto gi = groupOfBucket.find({waiter, w.bucket});
@@ -344,32 +374,33 @@ inline Report BuildReport(const Analyzer& an, const SymbolsFor& symbolsFor, cons
       for (; it != theirs.end() && it->start < w.end; ++it) {
         const uint64_t a = (std::max)(it->start, w.start), b = (std::min)(it->end, w.end);
         if (b <= a) continue;
-        if (it->kind == Interval::Running) running += b - a;
+        if (it->kind == Interval::Running) runningIn[runningFunction(it)] += b - a;
         else if (it->kind == Interval::Ready) ready += b - a;
-        else {
-          auto ki = groupOfBucket.find({waker, it->bucket});
-          if (ki != groupOfBucket.end()) waiting[ki->second] += b - a;
-        }
+        else if (const WaitGroup* kg = groupOf(*it)) waiting[kg] += b - a;
       }
     }
     if (total == 0) return;
-    auto part = [&](ChainPart::Kind kind, uint64_t ticks, const WaitGroup* wg) {
+    auto part = [&](ChainPart::Kind kind, uint64_t ticks, const WaitGroup* wg, const std::string& code = {}) {
       ChainPart p;
       p.kind = kind;
       p.seconds = secs(ticks);
       p.pct = 100.0 * static_cast<double>(ticks) / static_cast<double>(total);
+      p.yourCode = code;
       if (wg) {
         p.category = wg->category;
         p.yourCode = wg->yourCode;
       }
       if (p.pct >= 1.0) f.chain.push_back(p);
     };
-    uint64_t covered = running + ready;
+    uint64_t covered = ready;
     for (const auto& [wg, ticks] : waiting) {
       part(ChainPart::Kind::Waiting, ticks, wg);
       covered += ticks;
     }
-    part(ChainPart::Kind::Running, running, nullptr);
+    for (const auto& [code, ticks] : runningIn) {
+      part(ChainPart::Kind::Running, ticks, nullptr, code);
+      covered += ticks;
+    }
     part(ChainPart::Kind::Ready, ready, nullptr);
     if (covered < total) part(ChainPart::Kind::NotSeen, total - covered, nullptr);
     std::stable_sort(f.chain.begin(), f.chain.end(),
@@ -589,15 +620,30 @@ inline std::string RenderFindingText(const Finding& f) {
               f.thread.c_str(), FormatDuration(f.chainSeconds).c_str(), f.waker.c_str());
     for (size_t k = 0; k < f.chain.size() && k < 3; ++k) {
       const ChainPart& p = f.chain[k];
-      std::string what = p.kind == ChainPart::Kind::Running   ? "running"
+      std::string what = p.kind == ChainPart::Kind::Running   ? (p.yourCode.empty() ? "running" : "running, in " + p.yourCode)
                          : p.kind == ChainPart::Kind::Ready   ? "waiting for a free CPU"
                          : p.kind == ChainPart::Kind::NotSeen ? "not seen (outside the trace)"
                                                               : std::string(CategorySentence(p.category)) + ", in " + p.yourCode;
       Appendf(out, "      %s: %s (%.0f%%)\n", what.c_str(), FormatDuration(p.seconds).c_str(), p.pct);
     }
     const ChainPart& top = f.chain.front();
+    // W50: running and waiting in the same function of the program's code is one piece of
+    // slow work, e.g. a large write whose copying counts as running.
+    const ChainPart* alsoWaiting = nullptr;
+    if (top.kind == ChainPart::Kind::Running && !top.yourCode.empty())
+      for (const ChainPart& p : f.chain)
+        if (p.kind == ChainPart::Kind::Waiting && p.yourCode == top.yourCode && p.category != Category::Sleep &&
+            p.category != Category::Lock && top.pct + p.pct >= 50.0) {
+          alsoWaiting = &p;
+          break;
+        }
     if (f.category == Category::Lock) {
-      if (top.kind == ChainPart::Kind::Running)
+      if (alsoWaiting)
+        Appendf(out,
+                "    So it holds the lock while it is %s and running in between, in %s.\n"
+                "    Move that work outside the lock (copy the data first, then do the work).\n",
+                CategorySentence(alsoWaiting->category), top.yourCode.c_str());
+      else if (top.kind == ChainPart::Kind::Running)
         Appendf(out, "    So it holds the lock while it is running. Do less work while holding the lock.\n");
       else if (top.kind == ChainPart::Kind::Ready)
         Appendf(out, "    So it holds the lock while it is waiting for a free CPU. The machine is overloaded.\n");
@@ -987,6 +1033,8 @@ inline std::string RenderJson(const Report& r) {
           if (p.kind == ChainPart::Kind::Waiting) {
             j.Str("category", CategoryKey(p.category));
             j.Str("yourCode", p.yourCode);
+          } else if (p.kind == ChainPart::Kind::Running && !p.yourCode.empty()) {
+            j.Str("yourCode", p.yourCode);  // W50
           }
           j.Num("seconds", p.seconds);
           j.Num("pct", p.pct);

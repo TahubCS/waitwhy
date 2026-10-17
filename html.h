@@ -151,7 +151,7 @@ inline std::string HtmlChainBar(const Finding& f) {
                         : p.kind == ChainPart::Kind::Ready ? kReadyColor
                         : p.kind == ChainPart::Kind::NotSeen ? kNotSeenColor
                                                              : CategoryColor(p.category);
-    const std::string what = p.kind == ChainPart::Kind::Running   ? "running"
+    const std::string what = p.kind == ChainPart::Kind::Running   ? (p.yourCode.empty() ? "running" : "running, in " + p.yourCode)
                              : p.kind == ChainPart::Kind::Ready   ? "waiting for a free CPU"
                              : p.kind == ChainPart::Kind::NotSeen ? "not seen"
                                                                   : std::string(CategorySentence(p.category)) + ", in " + p.yourCode;

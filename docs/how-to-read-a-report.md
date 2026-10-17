@@ -90,12 +90,14 @@ gets a CPU-competition finding.
 
 When another of the program's threads ended the waits, waitwhy **measures** what that thread
 was doing during exactly those waits (the wait chain): running, waiting for a CPU, or waiting
-for something itself, with its share. For a lock this says what the holder did while holding
-it, and the last line says what to change:
+for something itself, with its share. Running time is credited to a function of your code when
+the stretch on the CPU lies between two waits in that same function. For a lock this says what
+the holder did while holding it, and the last line says what to change:
 
 | The holder was | Advice |
 |---|---|
 | running | Do less work while holding the lock. |
+| waiting for the disk (or the network, ...) and running in between, in one function | That function is the slow work, e.g. a large write whose copying counts as running: move it outside the lock. |
 | waiting for a free CPU | The machine is overloaded. |
 | sleeping | Release the lock before sleeping. |
 | waiting for another lock | One lock waits on the next: look at the chain. |

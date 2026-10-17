@@ -208,6 +208,15 @@ approval before work begins; see the status log.
 - **W47. `--redact`.** Leave user and machine names and folder paths out of every output, so
   reports, dumps and exports can be shared. Serves C7.
 - **W48. Contributor docs.** `CONTRIBUTING.md` and issue templates. Serves C7.
+- **W49. What a thread blocked the whole window waits on.** For a thread already blocked in a
+  file read or write when tracing started and still blocked at its end, find the handle of
+  that request and name it (console, pipe, socket, file), instead of guessing from function
+  names. Asked for by the user after a demo run where a frozen console looked like the disk.
+  Serves C1.
+- **W50. Where the lock holder was running.** In a wait chain, credit the holder's time on the
+  CPU to the function of the program's code it ran in, when the stretch lies between two
+  waits in that function; advice names that function when it both runs and waits there.
+  Asked for by the user after slowapp --mb 128 showed "running" as the largest part. Serves C1.
 
 ## Status log
 
@@ -316,3 +325,5 @@ Newest line last. Format: `YYYY-MM-DD  ID  status  note`.
 - 2026-10-17  W47  confirmed  CI run #98: CheckRedact passes on Windows, GCC and Clang.
 - 2026-10-17  W46  confirmed  CI runs #105 and #106: tests under ASan and UBSan pass; fuzz_dump and fuzz_json run 60 s each with no finding after the two fixes (dump numbers, replayed stack depth); waitwhy.exe shows control-flow guard and high-entropy ASLR in its PE headers.
 - 2026-10-17  W48  confirmed  CI run #105: CONTRIBUTING.md and the issue forms in; build green.
+- 2026-10-17  W49, W50  approved by the user after their run-demo.ps1 and slowapp --mb 128 runs.
+- 2026-10-17  W50  started  measureChain credits a running stretch to the function of the program's code when the waits before and after it (looking at most 16 intervals each way) are in the same function; text, JSON (parts.yourCode for running) and HTML show "running, in F"; when the largest part is running in F and the holder also waits in F (not sleep, not lock) for 50% or more together, the advice reads "So it holds the lock while it is <waiting for ...> and running in between, in F. Move that work outside the lock". Unit test CheckChainRunningIn.

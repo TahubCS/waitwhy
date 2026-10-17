@@ -96,7 +96,7 @@
                   "properties": {
                     "kind": { "enum": ["waiting", "running", "ready", "notSeen"] },
                     "category": { "$ref": "#/$defs/category" },
-                    "yourCode": { "type": "string" },
+                    "yourCode": { "type": "string", "description": "For waiting: where it waited. For running (W50): the function of the program's code it ran in, when known." },
                     "seconds": { "type": "number" },
                     "pct": { "type": "number" }
                   }

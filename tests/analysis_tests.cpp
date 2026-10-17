@@ -486,6 +486,80 @@ void CheckWakerRefinesDisk() {
   ExpectCategory("write ended by the system", row(4) ? row(4)->category : Category::Other, Category::Disk);
 }
 
+// W50: the lock holder's time on the CPU between two waits in the same function counts as
+// running in that function; running and waiting for the disk in one function is one piece of
+// slow work to move outside the lock (slowapp --mb 128 on a fast disk).
+void CheckChainRunningIn() {
+  std::printf("Where the lock holder was running (W50)\n");
+  FakeSymbols sym;
+  const auto lock = sym.Stack({"ntdll!NtWaitForAlertByThreadId", "ntdll!RtlSleepConditionVariableSRW",
+                               "slowapp!mtx_do_lock", "slowapp!std::mutex::lock", "slowapp!update_frame",
+                               "slowapp!main"});
+  const auto disk = sym.Stack({"ntdll!NtWriteFile", "KERNELBASE!WriteFile", "slowapp!write_settings_to_disk",
+                               "slowapp!saver_thread"});
+  const auto sleep = sym.Stack({"ntdll!NtDelayExecution", "KERNELBASE!SleepEx", "slowapp!saver_thread"});
+  Analyzer an;
+  an.pid = 1;
+  an.stacksOn = true;
+  an.targetThreads = {1, 2};
+  auto sw = [&an](uint64_t ts, uint32_t oldTid, uint32_t newTid, int8_t state, int8_t reason) {
+    SwitchEvent e;
+    e.ts = ts;
+    e.oldTid = oldTid;
+    e.newTid = newTid;
+    e.oldState = state;
+    e.oldWaitReason = reason;
+    an.OnSwitch(e);
+  };
+  auto stack = [&an](uint64_t eventTs, uint32_t tid, const std::vector<uint64_t>& frames) {
+    StackEvent s;
+    s.ts = eventTs + 1;
+    s.eventTs = eventTs;
+    s.tid = tid;
+    s.userFrames = frames;
+    an.OnStack(s);
+  };
+  sw(1, 0, 0, 0, 0);                 // the window starts
+  sw(5, 0, 2, 0, 0);                 // saver back from a write
+  stack(5, 2, disk);
+  sw(10, 1, 0, kThreadStateWaiting, 37);  // main waits for the lock saver holds
+  sw(40, 2, 0, kThreadStateWaiting, 0);   // saver writes: running 5-40 in write_settings_to_disk
+  sw(50, 0, 2, 0, 0);
+  stack(50, 2, disk);
+  sw(90, 2, 0, kThreadStateWaiting, 0);   // running 50-90, then another write
+  sw(100, 0, 2, 0, 0);
+  stack(100, 2, disk);
+  ReadyEvent r;                       // saver releases the lock at 105...
+  r.ts = 105;
+  r.readiedTid = 1;
+  r.byTid = 2;
+  an.OnReady(r);
+  sw(105, 2, 1, kThreadStateWaiting, 4);  // ...and sleeps in saver_thread; main runs again
+  stack(105, 1, lock);
+  sw(150, 0, 2, 0, 0);
+  stack(150, 2, sleep);
+  an.lastTs = 200;
+  an.FlushAtEnd();
+  ReportOptions opt;
+  opt.ticksPerSecond = 1000;
+  const Report rep = BuildReport(an, sym, opt, [](uint32_t t) { return "Thread " + std::to_string(t); });
+  const Finding* lockFinding = nullptr;
+  for (const Finding& f : rep.findings)
+    if (f.category == Category::Lock) lockFinding = &f;
+  ExpectEq("lock finding with a chain", lockFinding != nullptr && !lockFinding->chain.empty(), 1);
+  if (!lockFinding || lockFinding->chain.empty()) return;
+  const ChainPart& top = lockFinding->chain.front();
+  ExpectEq("largest part is running", top.kind == ChainPart::Kind::Running, 1);
+  ExpectStr("running, in", top.yourCode, "slowapp!write_settings_to_disk");
+  ExpectEq("its share (70 of 95 ticks)", static_cast<unsigned long long>(top.pct + 0.5), 74);
+  const std::string text = RenderText(rep);
+  ExpectEq("chain line", text.find("running, in slowapp!write_settings_to_disk: ") != std::string::npos, 1);
+  ExpectEq("the last stretch, ending in a sleep elsewhere, is only running",
+           text.find("      running: ") != std::string::npos, 1);
+  ExpectEq("advice", text.find("So it holds the lock while it is waiting for the disk and running in between, in "
+                               "slowapp!write_settings_to_disk.") != std::string::npos, 1);
+}
+
 // W35: two JSON reports compared by activity; the thread name, not its ID, matches them.
 // W44: a thread with more different call stacks than kMaxBucketsPerThread keeps the rest
 // together by wait reason, and the report says so.
@@ -637,6 +711,7 @@ int main() {
   CheckBucketCap();
   CheckRedact();
   CheckDamagedDump();
+  CheckChainRunningIn();
   std::printf(Failures() ? "%d check(s) failed.\n" : "All checks passed.\n", Failures());
   return Failures() ? 1 : 0;
 }
