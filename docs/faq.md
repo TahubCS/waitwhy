@@ -8,10 +8,11 @@ thread ended them. When that thread is one of the program's own, it measures wha
 was doing meanwhile.
 
 **Does it slow my program down?**
-A little. The kernel takes a call stack at every context switch of every thread on the
-machine while the trace runs, which costs a few percent on a busy machine. The program itself
-is not changed: no injection, no instrumentation, no restart (except in launch mode, where
-waitwhy starts it).
+A little, while it traces. The kernel takes a call stack at every context switch on the
+machine, about a microsecond each: CI measures 2-4% for a program switching 150,000 times a
+second, and up to about 90% only for a synthetic one that does nothing but switch (8.6 million
+times a second); see "Overhead" in the README. The program itself is not changed: no
+injection, no instrumentation, no restart (except in launch mode, where waitwhy starts it).
 
 **Why does it need Administrator rights?**
 The kernel's context-switch events are only available to administrators. Reading a recorded

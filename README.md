@@ -143,6 +143,17 @@ Every report ends with a "Data quality" section and an overall confidence:
 
 It also says which modules had full function names (from a `.pdb`) and which only exported names. Windows' own DLLs usually have only exported names, so a name like `ntdll!RtlSleepConditionVariableSRW` may really be a different function nearby.
 
+## Overhead
+
+While it traces, Windows takes a call stack at every context switch on the machine, about a microsecond each. What that costs a program depends on how often its threads switch. CI measures it on every push with `scenarios --mode bench`, pairs of threads handing a token back and forth (4-CPU GitHub runner, run #103):
+
+| Bench | Context switches per second, alone | Slowdown under `watch` | Under `record` |
+|---|---|---|---|
+| 50 µs of work between hand-overs | 154,000 | 4% | 2% |
+| No work at all (worst case) | 8,600,000 | 91% | 88% |
+
+A program that switches up to a few hundred thousand times a second, which already is a very busy one, loses a few percent while it is watched; only a synthetic one that does nothing but switch is slowed down heavily. The cost lasts only while tracing: keep `--seconds` short, and use `--no-suspend` if even the brief pause of a stack snapshot matters.
+
 ## Reports for scripts: JSON
 
 `--format json` prints the same report as JSON, laid out as described in `docs/report-schema.json` (`"schema": "waitwhy-report/1"`); `--out FILE` writes it to a file. When JSON goes to the console, every other line waitwhy prints goes to stderr, so the output can be parsed directly:
