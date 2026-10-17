@@ -70,6 +70,9 @@ struct DumpLine {
   }
 };
 
+// Most user frames a replayed stack gets.
+constexpr size_t kMaxStackFrames = 256;
+
 // A whole number, decimal or 0x hex; false for anything else, without throwing: dumps can come
 // from other machines, damaged or made up (W46, found by fuzz_dump).
 inline bool ParseNumber(const std::string& text, uint64_t* value) {
@@ -289,7 +292,10 @@ class DumpReplay {
       } else {
         // Version 1 kept only the first user address; stand-ins fill the rest of the depth,
         // so stacks with the same first address and depth look identical.
-        for (uint64_t i = 0; i < l.Get("userFrames"); ++i)
+        // At most kMaxStackFrames: kernel stack walks hold at most 192 frames, and a damaged
+        // count must not make the replay run without end (W46, found by fuzz_dump).
+        const uint64_t depth = (std::min)(l.Get("userFrames"), uint64_t{kMaxStackFrames});
+        for (uint64_t i = 0; i < depth; ++i)
           e.userFrames.push_back(i == 0 ? l.Get("firstUser") : 0x00007FF600001000ull + i * 16);
       }
       an_.OnStack(e);

@@ -572,9 +572,10 @@ void CheckDamagedDump() {
       "TARGET tid=1\n"
       "STACK ts=0x eventTs=12 tid=1 frames=0xZZ,,0x1,[other\n"
       "CSWITCH ts=99999999999999999999999 cpu=0 old=1 new=2 oldState=5 oldReason=37\n"
-      "SNAPSHOT tid=1 frames=-1,0x2\n");
+      "SNAPSHOT tid=1 frames=-1,0x2\n"
+      "STACK ts=20 eventTs=20 tid=1 userFrames=18446744073709551615 firstUser=0x10\n");
   const std::vector<DumpLine> lines = ReadDump(in);
-  ExpectEq("all lines read", lines.size(), 5);
+  ExpectEq("all lines read", lines.size(), 6);
   ExpectEq("a bad number is text only", lines[2].field.count("ts"), 0);
   ExpectEq("a too-large number is text only", lines[3].field.count("ts"), 0);
   ExpectEq("bad frames left out", ParseFrames("0xZZ,,0x1,[other").size(), 1);
