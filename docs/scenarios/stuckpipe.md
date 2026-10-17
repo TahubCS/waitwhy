@@ -13,14 +13,14 @@ Start-Process .\scenarios.exe -ArgumentList '--mode', 'stuckpipe', '--seconds', 
 
 ```
 * Thread N (writer) spent 100% of the time waiting for another thread or an event to signal it, in scenarios!fill_pipe.
-  Object     : a pipe (...\waitwhy_stuck)
+  Object     : a pipe
 ```
 
 ## What it shows
 
 A thread blocked for the whole window has no events in the trace, only the stack snapshot taken
-at the end. waitwhy also reads which handle that blocked write was given and looks up the
-object behind it (W49), so the write is reported as a wait on a pipe, not as "the disk" that the
+at the end. waitwhy also reads which handle that blocked write was given and asks Windows what
+type of file it is (W49), so the write is reported as a wait on a pipe, not as "the disk" that the
 name `WriteFile` alone would suggest. The same applies to a console window: a write to a console
 in selection mode shows as "the console window", with a hint to press Esc.
 

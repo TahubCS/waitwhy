@@ -161,6 +161,9 @@ constexpr size_t kMaxIntervals = size_t{1} << 20;
 // one, and the report says how much was grouped that way. Bounds memory on long captures.
 constexpr size_t kMaxBucketsPerThread = 4096;
 constexpr uint64_t kGroupedBucketMark = 0x9e3779b97f4a7c15ull;
+// Stand-in file object of a thread's snapshot wait (W49), "| tid": kernel addresses never look
+// like this, so it cannot meet a real file object of the trace.
+constexpr uint64_t kSnapshotObject = 0x5150000000000000ull;
 
 struct ThreadState {
   bool offCpu = false;  // `open` holds the period the thread is off the CPU right now
@@ -466,14 +469,6 @@ class Analyzer {
     return it != threadProcess.end() && it->second != 0 && it->second != kSystemProcess;
   }
 
-  // The name of a file object, used by the program or not (yet): what a stack snapshot's
-  // blocked handle refers to (W49).
-  const FileName* NameOf(uint64_t fileObject) const {
-    if (const FileName* f = FileOf(fileObject)) return f;
-    auto it = unclaimedNames.find(fileObject);
-    return fileObject && it != unclaimedNames.end() ? &it->second : nullptr;
-  }
-
   const FileName* FileOf(uint64_t fileObject) const {
     auto it = files.find(fileObject);
     return fileObject && it != files.end() ? &it->second : nullptr;
@@ -520,9 +515,10 @@ class Analyzer {
 
   // A whole-window thread becomes one wait from the window start; FlushAtEnd records both
   // kinds as still waiting at the end.
-  // `fileObject`: the file object of the file I/O it is blocked in, when the caller found it
-  // (W49); a wait whose I/O started inside the trace already has its own.
-  void ApplySnapshot(uint32_t tid, std::vector<uint64_t> frames, uint64_t fileObject = 0) {
+  // `object`: what the handle of the file I/O it is blocked in refers to, when the caller found
+  // out (W49). It stands in for a file object with no name; a wait whose I/O started inside the
+  // trace already has its own.
+  void ApplySnapshot(uint32_t tid, std::vector<uint64_t> frames, ObjectKind object = ObjectKind::None) {
     ThreadState& st = threads[tid];
     if (!st.seen && !st.offCpu) {
       st.open = OffCpu{};
@@ -533,9 +529,9 @@ class Analyzer {
       st.seen = true;
     }
     st.open.stack = std::move(frames);
-    if (fileObject && !st.open.fileObject) {
-      st.open.fileObject = fileObject;
-      ClaimFile(fileObject);
+    if (object != ObjectKind::None && object <= ObjectKind::Device && !st.open.fileObject) {
+      st.open.fileObject = kSnapshotObject | tid;
+      files[st.open.fileObject] = FileName{object, std::string()};
     }
   }
 

@@ -561,8 +561,8 @@ void CheckChainRunningIn() {
 }
 
 // W49: main is blocked writing to the console for the whole window (a selection in the
-// console window holds its output). The stack snapshot finds the file object of the write; the
-// trace's rundown named it before the program used it. Replayed from a dump.
+// console window holds its output). The stack snapshot found that the write's handle is a
+// console. Replayed from a dump.
 void CheckBlockedOnConsole() {
   std::printf("A thread blocked on the console for the whole window (W49)\n");
   FakeSymbols sym;
@@ -578,13 +578,12 @@ void CheckBlockedOnConsole() {
       "DUMP version=2 pid=7 ticksPerSecond=1000\n"
       "TARGET tid=1\n"
       "WINDOW ts=1000\n"
-      "FILENAME fileObject=0xffffa00012345670 kind=3 name=\\Device\\ConDrv\\Output\n"
       "END ts=9000 contextSwitches=0 stacksOn=1 eventsLost=0 buffersLost=0\n"
-      "SNAPSHOT tid=1 fileObject=0xffffa00012345670 frames=" + frames + "\n");
+      "SNAPSHOT tid=1 objectKind=3 frames=" + frames + "\n");
   Analyzer an;
   DumpReplay replay(an);
   replay.Run(ReadDump(in));
-  ExpectEq("the console is now the program's file", an.FileOf(0xffffa00012345670ULL) != nullptr, 1);
+  ExpectEq("stand-in file object", an.FileOf(kSnapshotObject | 1) != nullptr, 1);
   ReportOptions opt;
   opt.ticksPerSecond = 1000;
   const Report rep = BuildReport(an, sym, opt, [](uint32_t t) { return "Thread " + std::to_string(t); });

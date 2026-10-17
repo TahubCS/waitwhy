@@ -40,6 +40,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
@@ -49,6 +50,7 @@
 #include <cwchar>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -928,15 +930,22 @@ std::string ThreadLabel(uint32_t tid) {
 
 // W49: what a thread blocked for the whole window waits on. Its last system call is the one it
 // is blocked in; for a file read, write or I/O control the first argument is the file handle.
-// The handle is matched to its kernel file object through the system's handle list, and the
-// object to the name the trace's file rundown gave it. Nothing is asked of the file itself: a
-// query on a file with a synchronous request pending would wait behind that request.
+// waitwhy duplicates that handle and asks Windows what type of file it is: console, pipe or
+// disk. That query may itself wait behind the request the thread is stuck in, so it runs on a
+// helper thread and is given up after a moment.
+
+// A blocked file I/O call: its handle (0: not file I/O) and whether it was an I/O control.
+struct BlockedIo {
+  uint64_t handle = 0;
+  bool ioControl = false;
+};
 
 // The numbers of the system calls a thread blocks in for file I/O, read from ntdll's stubs
-// ("mov r10, rcx; mov eax, N"). A stub that does not look like that (hooked) is left out.
-const std::vector<uint16_t>& FileIoSystemCalls() {
-  static const std::vector<uint16_t> numbers = [] {
-    std::vector<uint16_t> found;
+// ("mov r10, rcx; mov eax, N"), with whether each is NtDeviceIoControlFile. A stub that does
+// not look like that (hooked) is left out.
+const std::vector<std::pair<uint16_t, bool>>& FileIoSystemCalls() {
+  static const std::vector<std::pair<uint16_t, bool>> numbers = [] {
+    std::vector<std::pair<uint16_t, bool>> found;
     HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
     for (const char* name : {"NtReadFile", "NtWriteFile", "NtDeviceIoControlFile", "NtFsControlFile",
                              "NtFlushBuffersFile"}) {
@@ -945,19 +954,19 @@ const std::vector<uint16_t>& FileIoSystemCalls() {
       if (!stub || stub[0] != 0x4c || stub[1] != 0x8b || stub[2] != 0xd1 || stub[3] != 0xb8) continue;
       uint32_t number = 0;
       std::memcpy(&number, stub + 4, sizeof number);
-      found.push_back(static_cast<uint16_t>(number));
+      found.emplace_back(static_cast<uint16_t>(number), std::strcmp(name, "NtDeviceIoControlFile") == 0);
     }
     return found;
   }();
   return numbers;
 }
 
-// The file handle a suspended thread's blocking file I/O call was given, or 0.
-uint64_t BlockedFileHandle(HANDLE thread) {
+// The file I/O call a suspended thread is blocked in.
+BlockedIo BlockedFileIo(HANDLE thread) {
   using QueryThreadFn = LONG(NTAPI*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
   static const auto query = reinterpret_cast<QueryThreadFn>(reinterpret_cast<void*>(
       GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationThread")));
-  if (!query) return 0;
+  if (!query) return {};
   struct {  // THREAD_LAST_SYSCALL_INFORMATION
     void* firstArgument;
     uint16_t systemCallNumber;
@@ -968,84 +977,47 @@ uint64_t BlockedFileHandle(HANDLE thread) {
   ULONG got = 0;
   if (query(thread, kThreadLastSystemCall, &last, sizeof last, &got) < 0 &&
       query(thread, kThreadLastSystemCall, &last, 16, &got) < 0)
-    return 0;
-  for (uint16_t n : FileIoSystemCalls())
-    if (n == last.systemCallNumber) return reinterpret_cast<uintptr_t>(last.firstArgument);
-  return 0;
+    return {};
+  for (const auto& [number, ioControl] : FileIoSystemCalls())
+    if (number == last.systemCallNumber) return {reinterpret_cast<uintptr_t>(last.firstArgument), ioControl};
+  return {};
 }
 
-// The system's handle list, read once: which kernel object a process's handle refers to.
-class HandleObjects {
- public:
-  uint64_t Of(uint32_t pid, uint64_t handle) {
-    if (!loaded_) Load();
-    // SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX: Object, UniqueProcessId, HandleValue, then 16 bytes.
-    constexpr size_t kHeader = 16, kEntry = 40;
-    uint64_t count = 0;
-    if (size_ >= kHeader) std::memcpy(&count, buffer_.data(), sizeof count);
-    for (uint64_t i = 0; i < count && kHeader + (i + 1) * kEntry <= size_; ++i) {
-      const uint8_t* e = buffer_.data() + kHeader + i * kEntry;
-      uint64_t object = 0, process = 0, value = 0;
-      std::memcpy(&object, e, 8);
-      std::memcpy(&process, e + 8, 8);
-      std::memcpy(&value, e + 16, 8);
-      if (process == pid && value == handle) return object;
-    }
-    return 0;
+// What a handle of process `proc` (opened with PROCESS_DUP_HANDLE) refers to, or None when
+// that cannot be found out within 200 ms. A pipe handle blocked in an I/O control is a socket:
+// Windows reports sockets as pipes, and socket calls are I/O controls.
+ObjectKind KindOfHandle(HANDLE proc, const BlockedIo& io) {
+  HANDLE copy = nullptr;
+  if (!io.handle || !DuplicateHandle(proc, reinterpret_cast<HANDLE>(static_cast<uintptr_t>(io.handle)),
+                                     GetCurrentProcess(), &copy, 0, FALSE, DUPLICATE_SAME_ACCESS))
+    return ObjectKind::None;
+  // The helper owns the copy and closes it, also when it finishes after waitwhy gave up.
+  std::packaged_task<DWORD()> ask([copy] {
+    const DWORD type = GetFileType(copy);
+    CloseHandle(copy);
+    return type;
+  });
+  std::future<DWORD> answer = ask.get_future();
+  std::thread(std::move(ask)).detach();
+  if (answer.wait_for(std::chrono::milliseconds(200)) != std::future_status::ready) return ObjectKind::None;
+  switch (answer.get()) {
+    case FILE_TYPE_CHAR: return ObjectKind::Console;
+    case FILE_TYPE_PIPE: return io.ioControl ? ObjectKind::Socket : ObjectKind::Pipe;
+    case FILE_TYPE_DISK: return ObjectKind::DiskFile;
+    default: return ObjectKind::None;
   }
-
- private:
-  void Load() {
-    loaded_ = true;
-    using QuerySystemFn = LONG(NTAPI*)(ULONG, PVOID, ULONG, PULONG);
-    const auto query = reinterpret_cast<QuerySystemFn>(reinterpret_cast<void*>(
-        GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQuerySystemInformation")));
-    if (!query) return;
-    // Windows 11 24H2 shows kernel addresses in the list only to a caller with the debug
-    // privilege enabled. An Administrator holds it, disabled; it is enabled for this one query.
-    HANDLE token = nullptr;
-    TOKEN_PRIVILEGES enable{}, previous{};
-    DWORD previousSize = 0;
-    bool adjusted = false;
-    if (OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token) &&
-        LookupPrivilegeValueW(nullptr, L"SeDebugPrivilege", &enable.Privileges[0].Luid)) {
-      enable.PrivilegeCount = 1;
-      enable.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
-      adjusted = AdjustTokenPrivileges(token, FALSE, &enable, sizeof previous, &previous, &previousSize) &&
-                 GetLastError() == ERROR_SUCCESS;
-    }
-    constexpr ULONG kSystemExtendedHandleInformation = 64;
-    constexpr LONG kInfoLengthMismatch = static_cast<LONG>(0xC0000004);
-    buffer_.resize(size_t{4} << 20);
-    for (int tries = 0; tries < 6; ++tries) {
-      ULONG needed = 0;
-      const LONG status = query(kSystemExtendedHandleInformation, buffer_.data(), static_cast<ULONG>(buffer_.size()), &needed);
-      if (status == kInfoLengthMismatch && buffer_.size() < (size_t{1} << 30)) {
-        buffer_.resize((std::max)(buffer_.size() * 2, static_cast<size_t>(needed) + (size_t{1} << 20)));
-        continue;
-      }
-      if (status >= 0) size_ = (std::min)(buffer_.size(), static_cast<size_t>(needed ? needed : buffer_.size()));
-      break;
-    }
-    if (adjusted) AdjustTokenPrivileges(token, FALSE, &previous, 0, nullptr, nullptr);
-    if (token) CloseHandle(token);
-  }
-
-  bool loaded_ = false;
-  std::vector<uint8_t> buffer_;
-  size_t size_ = 0;
-};
+}
 
 // Reads the user-mode call stack of a thread that is blocked right now, innermost first, by
 // suspending it for the moment the walk takes. `proc` must have DbgHelp initialised.
-// `*fileHandle` gets the handle of the file I/O it is blocked in, or 0 (W49).
+// `*io` gets the file I/O call it is blocked in, if any (W49).
 // Returns false when the thread cannot be opened (it has exited).
-bool SnapshotStack(HANDLE proc, uint32_t tid, std::vector<uint64_t>* frames, uint64_t* fileHandle) {
-  *fileHandle = 0;
+bool SnapshotStack(HANDLE proc, uint32_t tid, std::vector<uint64_t>* frames, BlockedIo* io) {
+  *io = BlockedIo{};
   HANDLE th = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE, tid);
   if (!th) return false;
   if (SuspendThread(th) != static_cast<DWORD>(-1)) {
-    *fileHandle = BlockedFileHandle(th);
+    *io = BlockedFileIo(th);
     CONTEXT ctx{};
     ctx.ContextFlags = CONTEXT_FULL;
     if (GetThreadContext(th, &ctx)) {  // user-mode registers, even while blocked in the kernel
@@ -1073,7 +1045,6 @@ bool SnapshotStack(HANDLE proc, uint32_t tid, std::vector<uint64_t>* frames, uin
 // Threads still blocked when the trace ends, or blocked for the whole window, get one stack
 // snapshot each (W7); the analysis decides which ones need it.
 void SnapshotThreadsStillBlocked() {
-  HandleObjects handles;
   for (uint32_t process : WatchedProcesses()) {
     HANDLE proc = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, process);
     if (!proc) continue;
@@ -1082,24 +1053,25 @@ void SnapshotThreadsStillBlocked() {
       CloseHandle(proc);
       continue;
     }
+    // A separate handle for duplicating the program's handles (W49): without that right the
+    // snapshots are still taken.
+    HANDLE dupFrom = OpenProcess(PROCESS_DUP_HANDLE, FALSE, process);
     for (uint32_t tid : g_analysis.targetThreads) {
       if (g_analysis.ProcessOf(tid) != process || !g_analysis.NeedsSnapshot(tid)) continue;
       std::vector<uint64_t> frames;
-      uint64_t fileHandle = 0;
-      if (!SnapshotStack(proc, tid, &frames, &fileHandle)) continue;  // gone; leave it as never seen
-      // Only a file object the trace named is kept: a name is what tells console from disk.
-      uint64_t fileObject = fileHandle ? handles.Of(process, fileHandle) : 0;
-      const Analyzer::FileName* name = g_analysis.NameOf(fileObject);
-      if (!name || name->path.empty()) fileObject = 0;
+      BlockedIo io;
+      if (!SnapshotStack(proc, tid, &frames, &io)) continue;  // gone; leave it as never seen
+      const ObjectKind object = io.handle && dupFrom ? KindOfHandle(dupFrom, io) : ObjectKind::None;
       if (g_dump) {
-        if (fileObject && !g_analysis.FileOf(fileObject)) DumpFileName(fileObject, *name);
         std::fprintf(g_dump, "SNAPSHOT tid=%u", tid);
-        if (fileObject) std::fprintf(g_dump, " fileObject=0x%llx", static_cast<unsigned long long>(fileObject));
+        if (object != ObjectKind::None) std::fprintf(g_dump, " objectKind=%d", static_cast<int>(object));
+        else if (io.handle) std::fputs(" fileIo=unknown", g_dump);  // blocked in file I/O; type not found
         WriteFrames(g_dump, frames);
         std::fputc('\n', g_dump);
       }
-      g_analysis.ApplySnapshot(tid, std::move(frames), fileObject);
+      g_analysis.ApplySnapshot(tid, std::move(frames), object);
     }
+    if (dupFrom) CloseHandle(dupFrom);
     SymCleanup(proc);
     CloseHandle(proc);
   }
